@@ -53,7 +53,7 @@ public class EventForwarder {
                 username = event.getBoundChatType().name().getString();
             }
         } catch (Exception e) {
-            // Fallback: try to parse "<username> message" format
+            BridgeMod.LOGGER.debug("Could not extract username from chat type, falling back to text parse: {}", e.getMessage());
             if (text.startsWith("<") && text.contains(">")) {
                 username = text.substring(1, text.indexOf(">"));
                 text = text.substring(text.indexOf(">") + 2);

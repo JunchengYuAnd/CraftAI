@@ -1,7 +1,6 @@
 # Gradle
 build/
 .gradle/
-gradle/wrapper/gradle-wrapper.jar
 
 # IDE
 .idea/
@@ -23,7 +22,7 @@ src/generated/
 .DS_Store
 Thumbs.db
 
-# Misc
+# Compiled
 *.class
 *.jar
 !gradle/wrapper/gradle-wrapper.jar
