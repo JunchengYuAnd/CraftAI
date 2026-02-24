@@ -1,5 +1,6 @@
 package com.playstudio.bridgemod;
 
+import com.playstudio.bridgemod.handler.QueryHandler;
 import com.playstudio.bridgemod.state.EventForwarder;
 import com.playstudio.bridgemod.state.StateSyncManager;
 import com.playstudio.bridgemod.websocket.BridgeWebSocketServer;
@@ -43,6 +44,10 @@ public class BridgeMod {
             return;
         }
 
+        // Register query handlers (Phase 2)
+        QueryHandler queryHandler = new QueryHandler(wsServer);
+        queryHandler.registerAll(wsServer.getMessageHandler());
+
         // Register event listeners on Forge event bus
         MinecraftForge.EVENT_BUS.register(new StateSyncManager(wsServer));
         MinecraftForge.EVENT_BUS.register(new EventForwarder(wsServer));
@@ -59,7 +64,7 @@ public class BridgeMod {
             }
         }));
 
-        LOGGER.info("Bridge Mod Phase 1 ready - WebSocket, StateSync, EventForwarder active");
+        LOGGER.info("Bridge Mod Phase 2 ready - WebSocket, StateSync, EventForwarder, QueryHandler active");
     }
 
     /**
