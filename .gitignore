@@ -1,0 +1,29 @@
+# Gradle
+build/
+.gradle/
+gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+.eclipse/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Forge / MC
+run/
+logs/
+src/generated/
+
+# Local JDK
+.jdk/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
