@@ -70,7 +70,7 @@ public class MessageHandler {
         } catch (JsonSyntaxException e) {
             BridgeMod.LOGGER.error("Invalid JSON message: {}", rawMessage);
             server.sendResponse(conn, null, false, null, "Invalid JSON: " + e.getMessage());
-        } catch (Exception e) {
+        } catch (Throwable e) {
             BridgeMod.LOGGER.error("Error handling message: {}", e.getMessage(), e);
             server.sendResponse(conn, null, false, null, "Internal error: " + e.getMessage());
         }

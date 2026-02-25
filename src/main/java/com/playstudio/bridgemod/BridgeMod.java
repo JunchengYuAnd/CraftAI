@@ -1,6 +1,8 @@
 package com.playstudio.bridgemod;
 
+import com.playstudio.bridgemod.handler.BotHandler;
 import com.playstudio.bridgemod.handler.QueryHandler;
+import com.playstudio.bridgemod.render.PathRenderer;
 import com.playstudio.bridgemod.state.EventForwarder;
 import com.playstudio.bridgemod.state.StateSyncManager;
 import com.playstudio.bridgemod.websocket.BridgeWebSocketServer;
@@ -25,6 +27,7 @@ public class BridgeMod {
 
     private static final int WEBSOCKET_PORT = 8089;
     private static BridgeWebSocketServer wsServer;
+    private static BotHandler botHandler;
 
     public BridgeMod() {
         LOGGER.info("Bridge Mod {} initializing", MOD_VERSION);
@@ -48,12 +51,23 @@ public class BridgeMod {
         QueryHandler queryHandler = new QueryHandler(wsServer);
         queryHandler.registerAll(wsServer.getMessageHandler());
 
+        // Register bot handler (Phase 3A)
+        botHandler = new BotHandler(wsServer);
+        botHandler.registerAll(wsServer.getMessageHandler());
+        MinecraftForge.EVENT_BUS.register(botHandler);
+
+        // Register path renderer (Phase 3B - visualize A* paths)
+        MinecraftForge.EVENT_BUS.register(new PathRenderer(botHandler));
+
         // Register event listeners on Forge event bus
         MinecraftForge.EVENT_BUS.register(new StateSyncManager(wsServer));
         MinecraftForge.EVENT_BUS.register(new EventForwarder(wsServer));
 
         // Shutdown hook for graceful cleanup
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            if (botHandler != null) {
+                botHandler.shutdown();
+            }
             if (wsServer != null) {
                 LOGGER.info("Shutting down WebSocket server...");
                 try {
@@ -64,7 +78,7 @@ public class BridgeMod {
             }
         }));
 
-        LOGGER.info("Bridge Mod Phase 2 ready - WebSocket, StateSync, EventForwarder, QueryHandler active");
+        LOGGER.info("Bridge Mod Phase 3B ready - WebSocket, StateSync, EventForwarder, QueryHandler, BotHandler, PathRenderer active");
     }
 
     /**

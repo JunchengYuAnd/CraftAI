@@ -15,11 +15,11 @@ displayTest="IGNORE_ALL_VERSION"
     mandatory=true
     versionRange="${forge_version_range}"
     ordering="NONE"
-    side="CLIENT"
+    side="BOTH"
 
 [[dependencies.${mod_id}]]
     modId="minecraft"
     mandatory=true
     versionRange="${minecraft_version_range}"
     ordering="NONE"
-    side="CLIENT"
+    side="BOTH"
