@@ -5,6 +5,8 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayList;
+
 /**
  * Execution logic for jumping up 1 block.
  * Ported from Baritone's MovementAscend.updateState().
@@ -26,6 +28,17 @@ public class MovementAscend extends Movement {
 
     @Override
     protected MovementStatus updateState() {
+        // Phase 3C: detect obstacle blocks to mine before jumping
+        if (positionsToMine == null) {
+            ArrayList<BlockPos> toMine = new ArrayList<>();
+            BlockPos srcUp2 = src.above(2);
+            BlockPos destHead = dest.above();
+            if (!canWalkThroughRuntime(srcUp2)) toMine.add(srcUp2);
+            if (!canWalkThroughRuntime(dest)) toMine.add(dest);
+            if (!canWalkThroughRuntime(destHead)) toMine.add(destHead);
+            positionsToMine = toMine.toArray(new BlockPos[0]);
+        }
+
         // Baritone: if fallen below source, movement is impossible.
         // Water tolerance: bot Y can float slightly below the integer block boundary
         // (e.g. Y=60.99 → playerFeet Y=60 while src Y=61). Use raw Y with tolerance.

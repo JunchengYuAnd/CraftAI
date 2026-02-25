@@ -50,8 +50,8 @@ public class PathExecutor {
     private static final double MAX_DIST_FROM_PATH = 2.0;
     private static final double MAX_MAX_DIST_FROM_PATH = 3.0;
     private static final int MAX_TICKS_AWAY = 200;
-    private static final int MAX_TICKS_PER_MOVEMENT = 100;  // Baritone: originalCost + movementTimeoutTicks
-    private static final int STUCK_THRESHOLD = 40;
+    private static final int MAX_TICKS_PER_MOVEMENT = 300;  // Phase 3C: allow time for mining (stone ~30t, obsidian ~600t)
+    private static final int STUCK_THRESHOLD = 60;  // Phase 3C: mining keeps bot stationary longer
     private static final double MOVE_THRESHOLD = 0.05;
 
     public enum Status {

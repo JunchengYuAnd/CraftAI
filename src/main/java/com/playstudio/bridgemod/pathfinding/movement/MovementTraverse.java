@@ -8,6 +8,8 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LadderBlock;
 import net.minecraft.world.level.block.VineBlock;
 
+import java.util.ArrayList;
+
 /**
  * Execution logic for flat 1-block cardinal movement.
  * Ported from Baritone's MovementTraverse.updateState().
@@ -26,6 +28,16 @@ public class MovementTraverse extends Movement {
 
     @Override
     protected MovementStatus updateState() {
+        // Phase 3C: detect obstacle blocks to mine before moving
+        if (positionsToMine == null) {
+            ArrayList<BlockPos> toMine = new ArrayList<>();
+            BlockPos feetLevel = new BlockPos(dest.getX(), src.getY(), dest.getZ());
+            BlockPos headLevel = feetLevel.above();
+            if (!canWalkThroughRuntime(feetLevel)) toMine.add(feetLevel);
+            if (!canWalkThroughRuntime(headLevel)) toMine.add(headLevel);
+            positionsToMine = toMine.toArray(new BlockPos[0]);
+        }
+
         BlockPos feet = playerFeet();
 
         // Success: at destination

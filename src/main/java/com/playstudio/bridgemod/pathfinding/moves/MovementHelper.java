@@ -3,6 +3,7 @@ package com.playstudio.bridgemod.pathfinding.moves;
 import com.playstudio.bridgemod.pathfinding.ActionCosts;
 import com.playstudio.bridgemod.pathfinding.CalculationContext;
 import com.playstudio.bridgemod.pathfinding.PrecomputedData;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.*;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
@@ -206,8 +207,7 @@ public final class MovementHelper {
 
     /**
      * Get the mining duration in ticks to break a block.
-     * Phase 3B: returns 0 if passable, COST_INF if not (no mining).
-     * Phase 3C will implement actual mining duration calculation.
+     * Phase 3C: calculates actual mining cost using vanilla getDestroyProgress().
      *
      * @param includesFalling if true, account for blocks that might fall when broken
      */
@@ -216,7 +216,31 @@ public final class MovementHelper {
         if (canWalkThrough(ctx, x, y, z, state)) {
             return 0;  // Already passable, no mining needed
         }
-        // Phase 3B: don't mine, treat as impassable
+
+        // Unbreakable blocks (bedrock, barriers, etc.) — hardness < 0
+        BlockPos pos = new BlockPos(x, y, z);
+        float hardness = state.getDestroySpeed(ctx.getLevel(), pos);
+        if (hardness < 0) {
+            return ActionCosts.COST_INF;
+        }
+
+        // Don't mine liquid blocks (water/lava would flow out)
+        if (isLiquid(state)) {
+            return ActionCosts.COST_INF;
+        }
+
+        // Calculate actual mining duration using vanilla API
+        // getDestroyProgress() accounts for: tool type, enchantments (Efficiency),
+        // water penalty, mining fatigue, Haste, etc.
+        if (ctx.player != null) {
+            float progressPerTick = state.getDestroyProgress(ctx.player, ctx.getLevel(), pos);
+            if (progressPerTick <= 0) {
+                return ActionCosts.COST_INF;
+            }
+            return Math.ceil(1.0 / progressPerTick);
+        }
+
+        // No player reference — can't calculate, treat as impassable
         return ActionCosts.COST_INF;
     }
 }

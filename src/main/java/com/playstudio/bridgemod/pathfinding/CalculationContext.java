@@ -1,5 +1,6 @@
 package com.playstudio.bridgemod.pathfinding;
 
+import com.playstudio.bridgemod.bot.FakePlayer;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerChunkCache;
@@ -44,6 +45,9 @@ public class CalculationContext {
     public final int maxFallHeightNoWater;
     public final double waterWalkSpeed;
     public final double jumpPenalty;
+    // Player reference for mining cost calculation (Phase 3C)
+    public final FakePlayer player;  // nullable
+
     // Water features (Baritone)
     public final boolean assumeWalkOnWater;       // Jesus mode / Frost Walker
     public final double walkOnWaterOnePenalty;     // Extra cost for walking on water surface in Jesus mode
@@ -65,6 +69,7 @@ public class CalculationContext {
         this.chunkCache = new Long2ObjectOpenHashMap<>(512, 0.5f);
         this.precomputed = PrecomputedData.getInstance();
         this.canSprint = canSprint;
+        this.player = (player instanceof FakePlayer fp) ? fp : null;
         // Match Baritone defaults
         this.allowDiagonalDescend = true;
         this.allowDiagonalAscend = true;

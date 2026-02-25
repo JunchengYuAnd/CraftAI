@@ -9,6 +9,9 @@ import net.minecraft.world.level.block.CarpetBlock;
 import net.minecraft.world.level.block.WaterlilyBlock;
 import net.minecraft.world.level.block.state.BlockState;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * Abstract base class for movement execution.
  * Ported from Baritone's Movement class, adapted for FakePlayer.
@@ -30,6 +33,11 @@ public abstract class Movement {
     protected final BlockPos dest;
     protected MovementStatus status = MovementStatus.RUNNING;
 
+    // Phase 3C: mining during pathfinding
+    protected BlockPos[] positionsToMine;  // blocks to mine before moving (filled by subclass)
+    protected int miningIndex = 0;
+    protected boolean isMining = false;
+
     protected Movement(FakePlayer bot, BlockPos src, BlockPos dest) {
         this.bot = bot;
         this.src = src;
@@ -39,14 +47,53 @@ public abstract class Movement {
     /**
      * Execute one tick of this movement.
      * Called by PathExecutor each server tick.
-     * Ported from Baritone's Movement.update().
+     *
+     * Phase 3C: PREPPING phase — mine obstacle blocks before executing movement.
+     * Subclasses fill positionsToMine[] in their updateState() first call.
+     * The base class handles mining sequentially, then delegates to updateState().
      */
     public MovementStatus update() {
         if (status.isComplete()) {
             return status;
         }
+
+        // PREPPING: mine obstacle blocks before moving
+        if (positionsToMine != null && miningIndex < positionsToMine.length) {
+            return tickMining();
+        }
+
+        // EXECUTING: normal movement
         status = updateState();
         return status;
+    }
+
+    /**
+     * Mine the next block in positionsToMine[].
+     * Uses FakePlayer.startDigging() — the same progressive mining as bot_dig.
+     */
+    private MovementStatus tickMining() {
+        BlockPos target = positionsToMine[miningIndex];
+        BlockState state = bot.serverLevel().getBlockState(target);
+
+        // Already passable → skip to next
+        if (state.isAir() || state.getCollisionShape(bot.serverLevel(), target).isEmpty()) {
+            miningIndex++;
+            isMining = false;
+            return MovementStatus.RUNNING;
+        }
+
+        // Not yet digging → start
+        if (!bot.isDigging()) {
+            bot.clearMovementInput();
+            bot.startDigging(target, null, (success, reason) -> {
+                isMining = false;
+                miningIndex++;
+            });
+            isMining = true;
+        }
+
+        // Wait for digging to complete (tickDigging runs in FakePlayer.tick())
+        return MovementStatus.RUNNING;
     }
 
     /**
@@ -61,6 +108,9 @@ public abstract class Movement {
      */
     public void reset() {
         status = MovementStatus.RUNNING;
+        positionsToMine = null;
+        miningIndex = 0;
+        isMining = false;
     }
 
     // ==================== Helpers (adapted from Baritone's MovementHelper) ====================

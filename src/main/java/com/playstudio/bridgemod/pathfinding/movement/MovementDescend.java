@@ -5,6 +5,8 @@ import com.playstudio.bridgemod.pathfinding.moves.MovementHelper;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.Block;
 
+import java.util.ArrayList;
+
 /**
  * Execution logic for walking off an edge and falling 1+ blocks.
  * Ported from Baritone's MovementDescend.updateState().
@@ -34,6 +36,15 @@ public class MovementDescend extends Movement {
 
     @Override
     protected MovementStatus updateState() {
+        // Phase 3C: detect obstacle blocks at landing zone
+        if (positionsToMine == null) {
+            ArrayList<BlockPos> toMine = new ArrayList<>();
+            BlockPos destHead = dest.above();
+            if (!canWalkThroughRuntime(dest)) toMine.add(dest);
+            if (!canWalkThroughRuntime(destHead)) toMine.add(destHead);
+            positionsToMine = toMine.toArray(new BlockPos[0]);
+        }
+
         BlockPos feet = playerFeet();
 
         // fakeDest: a point 1 block beyond dest in the movement direction.
