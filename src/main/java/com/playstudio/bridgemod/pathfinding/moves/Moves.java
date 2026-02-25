@@ -14,7 +14,7 @@ import net.minecraft.world.level.block.state.BlockState;
  * Ported from Baritone's Moves enum.
  *
  * Phase 3B: 16 movement types (4 traverse + 4 ascend + 4 descend + 4 diagonal).
- * Phase 3C will add: DOWNWARD, PILLAR, PARKOUR.
+ * Phase 3C: +1 PILLAR_UP = 17 total. TODO: PARKOUR.
  *
  * Omissions vs Baritone (Phase 3B): no block placing (bridge/pillar), no mining,
  * no parkour, no frost walker. These are all Phase 3C.
@@ -125,6 +125,14 @@ public enum Moves {
         @Override
         public void apply(CalculationContext ctx, int x, int y, int z, MoveResult result) {
             MovementDiagonal.cost(ctx, x, y, z, x - 1, z + 1, result);
+        }
+    },
+
+    // --- Pillar (jump straight up, place block under feet) ---
+    PILLAR_UP(0, 1, 0) {
+        @Override
+        public double cost(CalculationContext ctx, int x, int y, int z) {
+            return MovementPillar.cost(ctx, x, y, z);
         }
     };
 
@@ -629,6 +637,68 @@ public enum Moves {
             }
             result.x = destX;
             result.z = destZ;
+        }
+    }
+
+    /**
+     * Pillar: jump straight up and place block under feet.
+     * Same XZ, Y+1. 100% ported from Baritone's MovementPillar.cost().
+     *
+     * Process: jump → place block at (x,y,z) against (x,y-1,z) face UP → land on new block.
+     *
+     * Key Baritone design: does NOT check canWalkOn(y-1). For consecutive pillars, the block
+     * at y-1 was placed by the prior pillar movement and doesn't exist in the world snapshot.
+     * Instead, costOfPlacingAt() only checks hasThrowawayBlock. A small +0.1 penalty is added
+     * when y-1 is currently air, as a tiebreaker to prefer pillaring on real ground.
+     */
+    static final class MovementPillar {
+        static double cost(CalculationContext ctx, int x, int y, int z) {
+            BlockState fromState = ctx.get(x, y, z);      // block at feet (where we place)
+            Block from = fromState.getBlock();
+            BlockState fromDown = ctx.get(x, y - 1, z);   // block below feet
+            Block fromDownBlock = fromDown.getBlock();
+
+            // Baritone: can't pillar from ladder/vine below
+            if (fromDownBlock instanceof LadderBlock || fromDownBlock instanceof VineBlock) {
+                return ActionCosts.COST_INF;
+            }
+
+            // Baritone: can't pillar from bottom slab (can't jump high enough)
+            if (MovementHelper.isBottomSlab(fromDown)) {
+                return ActionCosts.COST_INF;
+            }
+
+            // Baritone: can't pillar from liquid
+            if (MovementHelper.isLiquid(fromState) || MovementHelper.isLiquid(fromDown)) {
+                return ActionCosts.COST_INF;
+            }
+
+            // Baritone: costOfPlacingAt — only checks inventory, NOT whether position is solid
+            if (!ctx.hasThrowawayBlock) return ActionCosts.COST_INF;
+            double placeCost = ActionCosts.PLACE_ONE_BLOCK_COST;
+            // Baritone: +0.1 tiebreaker penalty when pillar-on-air (consecutive pillars)
+            if (fromDown.isAir()) {
+                placeCost += 0.1;
+            }
+
+            // Baritone: check block at y+2 (new head space)
+            BlockState toBreak = ctx.get(x, y + 2, z);
+            double hardness = MovementHelper.getMiningDurationTicks(ctx, x, y + 2, z, toBreak, true);
+            if (hardness >= ActionCosts.COST_INF) return ActionCosts.COST_INF;
+
+            // Baritone: falling block check at y+3 when y+2 needs mining
+            if (hardness != 0) {
+                BlockState above = ctx.get(x, y + 3, z);
+                if (above.getBlock() instanceof FallingBlock) {
+                    BlockState srcUp = ctx.get(x, y + 1, z);
+                    if (!(toBreak.getBlock() instanceof FallingBlock)
+                            || !(srcUp.getBlock() instanceof FallingBlock)) {
+                        return ActionCosts.COST_INF;
+                    }
+                }
+            }
+
+            return ActionCosts.JUMP_ONE_BLOCK_COST + placeCost + ctx.jumpPenalty + hardness;
         }
     }
 }

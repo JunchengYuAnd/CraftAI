@@ -30,6 +30,21 @@ public class MovementDiagonal extends Movement {
             return MovementStatus.SUCCESS;
         }
 
+        // Fall detection: if bot has fallen below src Y, the diagonal move is irrecoverable.
+        // For diagonal ascend (dest Y > src Y): falling below src means 2+ block gap, impossible to jump.
+        // For flat/descend diagonal: falling below src-1 means we've deviated too far.
+        if (dest.getY() > src.getY()) {
+            // Diagonal ascend: if feet below src, can't recover (would need 2-block jump)
+            if (feet.getY() < src.getY()) {
+                return MovementStatus.UNREACHABLE;
+            }
+        } else {
+            // Flat or descend diagonal: allow 1 block below src, but not more
+            if (feet.getY() < src.getY() - 1) {
+                return MovementStatus.UNREACHABLE;
+            }
+        }
+
         // Valid position check (Baritone: playerInValidPosition)
         // For diagonal, valid positions are: src, dest, and the two intermediate blocks
         BlockPos diagA = new BlockPos(src.getX(), src.getY(), dest.getZ());
@@ -45,19 +60,18 @@ public class MovementDiagonal extends Movement {
             }
         }
 
-        // Jump for diagonal ascend (Baritone: if dest above src and player low + collided)
-        if (dest.getY() > src.getY()
-                && bot.getY() < src.getY() + 0.1
-                && bot.horizontalCollision) {
-            moveTowards(dest);
-            bot.setMovementInput(1.0f, 0.0f, true);
-            return MovementStatus.RUNNING;
-        }
-
         // Sprint check (Baritone: check all 4 intermediate positions are passable)
         bot.setSprinting(canSprintDiagonal());
 
         moveTowards(dest);
+
+        // Diagonal ascend: always try to jump when dest is above src.
+        // Baritone's condition (bot.getY() < src.getY() + 0.1 && horizontalCollision)
+        // is too restrictive for FakePlayer server-side physics.
+        if (dest.getY() > src.getY() && playerFeet().getY() < dest.getY()) {
+            bot.setMovementInput(1.0f, 0.0f, true);
+        }
+
         return MovementStatus.RUNNING;
     }
 

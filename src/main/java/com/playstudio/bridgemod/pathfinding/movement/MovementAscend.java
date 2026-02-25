@@ -102,44 +102,17 @@ public class MovementAscend extends Movement {
             return MovementStatus.RUNNING;
         }
 
-        // If already at src.up() (jumped but not yet at dest XZ), just walk forward
-        if (playerFeet().equals(src.above())) {
+        // Already at or above dest Y level — just walk forward, no jump needed
+        if (playerFeet().getY() >= dest.getY()) {
             return MovementStatus.RUNNING;
         }
 
-        // ==================== Jump timing (ported from Baritone) ====================
-
-        // Calculate movement axis: which axis has offset (X or Z)
-        int xAxis = Math.abs(src.getX() - dest.getX());  // 0 or 1
-        int zAxis = Math.abs(src.getZ() - dest.getZ());  // 0 or 1
-
-        // flatDistToNext: distance along the movement axis to dest center
-        double flatDistToNext = xAxis * Math.abs((dest.getX() + 0.5) - bot.getX())
-                + zAxis * Math.abs((dest.getZ() + 0.5) - bot.getZ());
-
-        // sideDist: distance perpendicular to the movement axis
-        double sideDist = zAxis * Math.abs((dest.getX() + 0.5) - bot.getX())
-                + xAxis * Math.abs((dest.getZ() + 0.5) - bot.getZ());
-
-        // Check lateral motion: don't jump if drifting sideways
-        Vec3 motion = bot.getDeltaMovement();
-        double lateralMotion = xAxis * motion.z + zAxis * motion.x;
-        if (Math.abs(lateralMotion) > 0.1) {
-            return MovementStatus.RUNNING;
-        }
-
-        // headBonkClear: if overhead is clear in all 4 directions, jump immediately
-        if (headBonkClear()) {
-            bot.setMovementInput(1.0f, 0.0f, true);
-            return MovementStatus.RUNNING;
-        }
-
-        // Don't jump if not close enough
-        if (flatDistToNext > 1.2 || sideDist > 0.2) {
-            return MovementStatus.RUNNING;
-        }
-
-        // Close enough - JUMP!
+        // Always jump when ascending. Baritone's precise timing (flatDistToNext,
+        // sideDist, lateralMotion, headBonkClear) is optimized for real client players.
+        // FakePlayer's server-side physics has subtle differences that cause those
+        // conditions to fail intermittently → bot walks into wall without jumping → stuck.
+        // Simplified approach: always set jump=true. When onGround()=false (already
+        // airborne), jumpFromGround() is a no-op, so this is safe.
         bot.setMovementInput(1.0f, 0.0f, true);
         return MovementStatus.RUNNING;
     }

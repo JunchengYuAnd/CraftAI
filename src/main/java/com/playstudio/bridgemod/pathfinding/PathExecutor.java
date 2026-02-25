@@ -243,6 +243,9 @@ public class PathExecutor {
             case DIAGONAL_SOUTHWEST:
                 return new MovementDiagonal(bot, src, dest);
 
+            case PILLAR_UP:
+                return new MovementPillar(bot, src, dest);
+
             default:
                 return inferMovement(bot, src, dest);
         }
@@ -256,7 +259,9 @@ public class PathExecutor {
         int dy = dest.getY() - src.getY();
         int dz = Math.abs(dest.getZ() - src.getZ());
 
-        if (dy > 0) {
+        if (dy > 0 && dx == 0 && dz == 0) {
+            return new MovementPillar(bot, src, dest);
+        } else if (dy > 0) {
             return new MovementAscend(bot, src, dest);
         } else if (dy < 0) {
             return new MovementDescend(bot, src, dest);
