@@ -3,6 +3,7 @@ package com.playstudio.bridgemod.pathfinding.movement;
 import com.playstudio.bridgemod.bot.FakePlayer;
 import com.playstudio.bridgemod.pathfinding.moves.MovementHelper;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.CarpetBlock;
@@ -23,8 +24,12 @@ import java.util.List;
  * Key differences from Baritone:
  * - No InputOverrideHandler: we call bot.setMovementInput() directly
  * - No LookBehavior: we call bot.setYRot()/setXRot() directly
- * - No block breaking/placing (Phase 3B): PREPPING phase is skipped
  * - Uses ServerLevel directly for block checks during execution
+ *
+ * Execution phases (Phase 3C):
+ * 1. PREPPING — mine obstacle blocks (positionsToMine[])
+ * 2. PLACING — place blocks for bridge/pillar (positionsToPlace[])
+ * 3. EXECUTING — movement-specific logic (updateState())
  */
 public abstract class Movement {
 
@@ -38,6 +43,12 @@ public abstract class Movement {
     protected int miningIndex = 0;
     protected boolean isMining = false;
 
+    // Phase 3C: block placement during pathfinding (bridge/pillar)
+    protected BlockPos[] positionsToPlace;    // blocks to place (filled by subclass)
+    protected BlockPos[] placeAgainstBlocks;  // corresponding "against" blocks for placement
+    protected Direction[] placeFaces;         // corresponding face directions
+    protected int placingIndex = 0;
+
     protected Movement(FakePlayer bot, BlockPos src, BlockPos dest) {
         this.bot = bot;
         this.src = src;
@@ -48,9 +59,8 @@ public abstract class Movement {
      * Execute one tick of this movement.
      * Called by PathExecutor each server tick.
      *
-     * Phase 3C: PREPPING phase — mine obstacle blocks before executing movement.
-     * Subclasses fill positionsToMine[] in their updateState() first call.
-     * The base class handles mining sequentially, then delegates to updateState().
+     * Execution order: mine obstacles → place blocks → move.
+     * Subclasses fill positionsToMine[] and positionsToPlace[] in their updateState() first call.
      */
     public MovementStatus update() {
         if (status.isComplete()) {
@@ -60,6 +70,11 @@ public abstract class Movement {
         // PREPPING: mine obstacle blocks before moving
         if (positionsToMine != null && miningIndex < positionsToMine.length) {
             return tickMining();
+        }
+
+        // PLACING: place blocks for bridge/pillar
+        if (positionsToPlace != null && placingIndex < positionsToPlace.length) {
+            return tickPlacing();
         }
 
         // EXECUTING: normal movement
@@ -97,6 +112,35 @@ public abstract class Movement {
     }
 
     /**
+     * Place the next block in positionsToPlace[].
+     * Uses FakePlayer.placeBlock() — instant placement (unlike progressive mining).
+     */
+    private MovementStatus tickPlacing() {
+        BlockPos target = positionsToPlace[placingIndex];
+
+        // Already has a solid block → skip
+        if (canWalkOnRuntime(target)) {
+            placingIndex++;
+            return MovementStatus.RUNNING;
+        }
+
+        // Equip a throwaway block
+        if (!bot.hasThrowawayBlock()) {
+            return MovementStatus.UNREACHABLE;
+        }
+        bot.equipThrowaway();
+
+        // Place block
+        boolean placed = bot.placeBlock(placeAgainstBlocks[placingIndex], placeFaces[placingIndex]);
+        if (placed) {
+            placingIndex++;
+        } else {
+            return MovementStatus.UNREACHABLE;
+        }
+        return MovementStatus.RUNNING;
+    }
+
+    /**
      * Movement-specific execution logic.
      * Each subclass implements this with its own state machine.
      */
@@ -111,6 +155,10 @@ public abstract class Movement {
         positionsToMine = null;
         miningIndex = 0;
         isMining = false;
+        positionsToPlace = null;
+        placeAgainstBlocks = null;
+        placeFaces = null;
+        placingIndex = 0;
     }
 
     // ==================== Helpers (adapted from Baritone's MovementHelper) ====================

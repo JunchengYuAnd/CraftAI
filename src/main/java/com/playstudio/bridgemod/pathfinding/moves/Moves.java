@@ -219,8 +219,22 @@ public enum Moves {
                 }
                 return WC + hardness1 + hardness2;
             } else {
-                // This would be a bridge (place block below dest) - Phase 3C
-                return ActionCosts.COST_INF;
+                // Bridge: no ground at dest — place block below dest
+                if (!ctx.hasThrowawayBlock) return ActionCosts.COST_INF;
+
+                // Must have source ground to place against (backplace)
+                if (!MovementHelper.canWalkOn(ctx, x, y - 1, z, srcDown)) {
+                    return ActionCosts.COST_INF;
+                }
+
+                // Dest feet and head must be passable (or mineable)
+                double h1 = MovementHelper.getMiningDurationTicks(ctx, destX, y, destZ, pb1, false);
+                if (h1 >= ActionCosts.COST_INF) return ActionCosts.COST_INF;
+                double h2 = MovementHelper.getMiningDurationTicks(ctx, destX, y + 1, destZ, pb0, true);
+                if (h2 >= ActionCosts.COST_INF) return ActionCosts.COST_INF;
+
+                // Cost = sneak to edge + place block + mining
+                return ActionCosts.SNEAK_ONE_BLOCK_COST + ActionCosts.PLACE_ONE_BLOCK_COST + h1 + h2;
             }
         }
     }
@@ -235,8 +249,23 @@ public enum Moves {
             BlockState destOn = ctx.get(destX, y, destZ);  // block we jump onto
 
             // Must be able to stand on the destination block
+            boolean needsPlacement = false;
             if (!MovementHelper.canWalkOn(ctx, destX, y, destZ, destOn)) {
-                return ActionCosts.COST_INF;  // Phase 3C: block placement
+                // Pillar-ascend: place block at dest feet position
+                if (!ctx.hasThrowawayBlock) return ActionCosts.COST_INF;
+
+                // Must have ground below dest to place against (face UP)
+                BlockState belowDest = ctx.get(destX, y - 1, destZ);
+                if (!MovementHelper.canWalkOn(ctx, destX, y - 1, destZ, belowDest)) {
+                    return ActionCosts.COST_INF;
+                }
+
+                // Dest feet must be passable (can place block into it)
+                if (!MovementHelper.canWalkThrough(ctx, destX, y, destZ, destOn)) {
+                    return ActionCosts.COST_INF;
+                }
+
+                needsPlacement = true;
             }
 
             // Baritone: falling block check - sand/gravel at y+3 would fall when y+2 cleared
@@ -257,8 +286,9 @@ public enum Moves {
 
             // Baritone: bottom slab jump restriction
             // Standing on bottom slab (feet at y+0.5) can't reach full block at y+1 (1.5 block jump)
+            // When placing a block, the placed block is always a full block, so skip slab-to-slab checks.
             boolean jumpingFromBottomSlab = MovementHelper.isBottomSlab(srcDown);
-            boolean jumpingToBottomSlab = MovementHelper.isBottomSlab(destOn);
+            boolean jumpingToBottomSlab = !needsPlacement && MovementHelper.isBottomSlab(destOn);
             if (jumpingFromBottomSlab && !jumpingToBottomSlab) {
                 return ActionCosts.COST_INF;
             }
@@ -275,7 +305,7 @@ public enum Moves {
                     walk = ActionCosts.WALK_ONE_BLOCK_COST;
                 }
             } else {
-                if (destOn.getBlock() == Blocks.SOUL_SAND) {
+                if (!needsPlacement && destOn.getBlock() == Blocks.SOUL_SAND) {
                     walk = ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST;
                 } else {
                     walk = Math.max(ActionCosts.JUMP_ONE_BLOCK_COST, ActionCosts.WALK_ONE_BLOCK_COST);
@@ -285,6 +315,9 @@ public enum Moves {
 
             // Mining costs for 3 blocks (Baritone order: srcUp2, dest feet, dest head)
             double totalCost = walk;
+            if (needsPlacement) {
+                totalCost += ActionCosts.PLACE_ONE_BLOCK_COST;
+            }
             totalCost += MovementHelper.getMiningDurationTicks(ctx, x, y + 2, z, srcUp2, false);
             if (totalCost >= ActionCosts.COST_INF) return ActionCosts.COST_INF;
             totalCost += MovementHelper.getMiningDurationTicks(ctx, destX, y + 1, destZ,

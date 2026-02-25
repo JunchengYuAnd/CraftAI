@@ -3,6 +3,7 @@ package com.playstudio.bridgemod.pathfinding.movement;
 import com.playstudio.bridgemod.bot.FakePlayer;
 import com.playstudio.bridgemod.pathfinding.moves.MovementHelper;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.LadderBlock;
@@ -19,6 +20,7 @@ import java.util.ArrayList;
  * - Y correction: jump if below dest Y
  * - Sprint when path ahead is clear
  * - Handles ladder/vine at source
+ * - Phase 3C: bridge (place block below dest when no ground)
  */
 public class MovementTraverse extends Movement {
 
@@ -28,7 +30,7 @@ public class MovementTraverse extends Movement {
 
     @Override
     protected MovementStatus updateState() {
-        // Phase 3C: detect obstacle blocks to mine before moving
+        // Phase 3C: detect obstacle blocks to mine AND bridge blocks to place
         if (positionsToMine == null) {
             ArrayList<BlockPos> toMine = new ArrayList<>();
             BlockPos feetLevel = new BlockPos(dest.getX(), src.getY(), dest.getZ());
@@ -36,12 +38,31 @@ public class MovementTraverse extends Movement {
             if (!canWalkThroughRuntime(feetLevel)) toMine.add(feetLevel);
             if (!canWalkThroughRuntime(headLevel)) toMine.add(headLevel);
             positionsToMine = toMine.toArray(new BlockPos[0]);
+
+            // Bridge detection: no ground at dest
+            if (!canWalkOnRuntime(dest.below())) {
+                BlockPos dir = dest.subtract(src);
+                Direction face = Direction.fromDelta(dir.getX(), 0, dir.getZ());
+                if (face != null && canWalkOnRuntime(src.below())) {
+                    positionsToPlace = new BlockPos[]{ dest.below() };
+                    placeAgainstBlocks = new BlockPos[]{ src.below() };
+                    placeFaces = new Direction[]{ face };
+                }
+            }
+
+            // If there's pending mining or placement, return RUNNING so the
+            // base class update() handles those phases before we continue.
+            if (positionsToMine.length > 0
+                    || (positionsToPlace != null && positionsToPlace.length > 0)) {
+                return MovementStatus.RUNNING;
+            }
         }
 
         BlockPos feet = playerFeet();
 
         // Success: at destination
         if (feet.equals(dest)) {
+            bot.setShiftKeyDown(false);
             return MovementStatus.SUCCESS;
         }
 
@@ -51,6 +72,7 @@ public class MovementTraverse extends Movement {
         BlockPos overshoot1 = dest.offset(direction);
         BlockPos overshoot2 = overshoot1.offset(direction);
         if (feet.equals(overshoot1) || feet.equals(overshoot2)) {
+            bot.setShiftKeyDown(false);
             return MovementStatus.SUCCESS;
         }
 
@@ -72,8 +94,13 @@ public class MovementTraverse extends Movement {
         // Check ground at destination (Baritone: isTheBridgeBlockThere)
         boolean bridgeBlockThere = canWalkOnRuntime(dest.below()) || ladder;
         if (!bridgeBlockThere) {
-            // No ground at dest - in Phase 3B we can't bridge, mark unreachable
+            // No ground and no placement set up — unreachable
             return MovementStatus.UNREACHABLE;
+        }
+
+        // Bridge just placed — disable sneak for normal walking
+        if (positionsToPlace != null && placingIndex >= positionsToPlace.length) {
+            bot.setShiftKeyDown(false);
         }
 
         // Ladder/vine: if currently on ladder and above ground, wait for descent

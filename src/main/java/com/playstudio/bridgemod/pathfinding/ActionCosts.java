@@ -15,6 +15,7 @@ public interface ActionCosts {
     double SNEAK_ONE_BLOCK_COST = 20 / 1.3;  // 15.385
     double SPRINT_ONE_BLOCK_COST = 20 / 5.612;  // 3.564
     double SPRINT_MULTIPLIER = SPRINT_ONE_BLOCK_COST / WALK_ONE_BLOCK_COST;  // ~0.769
+    double PLACE_ONE_BLOCK_COST = 20.0;  // estimated ticks for bridge/pillar block placement
 
     /**
      * To walk off an edge you need to walk 0.5 to the edge then 0.3 to start falling off

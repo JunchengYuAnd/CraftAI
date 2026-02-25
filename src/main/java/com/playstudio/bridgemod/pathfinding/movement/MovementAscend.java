@@ -19,6 +19,7 @@ import java.util.ArrayList;
  * - No jump needed for bottom slab step-up (within player stepHeight)
  * - No jump if already at src.up() (already jumped, just walk forward)
  * - headBonkClear: jump immediately if overhead is clear in all 4 directions
+ * - Phase 3C: pillar-ascend (place block at dest.below when no ground)
  */
 public class MovementAscend extends Movement {
 
@@ -28,7 +29,7 @@ public class MovementAscend extends Movement {
 
     @Override
     protected MovementStatus updateState() {
-        // Phase 3C: detect obstacle blocks to mine before jumping
+        // Phase 3C: detect obstacle blocks to mine AND pillar blocks to place
         if (positionsToMine == null) {
             ArrayList<BlockPos> toMine = new ArrayList<>();
             BlockPos srcUp2 = src.above(2);
@@ -37,6 +38,25 @@ public class MovementAscend extends Movement {
             if (!canWalkThroughRuntime(dest)) toMine.add(dest);
             if (!canWalkThroughRuntime(destHead)) toMine.add(destHead);
             positionsToMine = toMine.toArray(new BlockPos[0]);
+
+            // Pillar detection: no block to jump onto at dest.below
+            BlockPos destBelow = dest.below();
+            if (!canWalkOnRuntime(destBelow)) {
+                // Place block at destBelow, against the block below it (face UP)
+                BlockPos against = destBelow.below();
+                if (canWalkOnRuntime(against)) {
+                    positionsToPlace = new BlockPos[]{ destBelow };
+                    placeAgainstBlocks = new BlockPos[]{ against };
+                    placeFaces = new Direction[]{ Direction.UP };
+                }
+            }
+
+            // If there's pending mining or placement, return RUNNING so the
+            // base class update() handles those phases before we continue.
+            if (positionsToMine.length > 0
+                    || (positionsToPlace != null && positionsToPlace.length > 0)) {
+                return MovementStatus.RUNNING;
+            }
         }
 
         // Baritone: if fallen below source, movement is impossible.
@@ -69,7 +89,7 @@ public class MovementAscend extends Movement {
         // Check if the block we're jumping onto exists
         BlockPos positionToPlace = dest.below(); // the block we land on
         if (!canWalkOnRuntime(positionToPlace)) {
-            // Block disappeared - can't ascend (no block placing in Phase 3B)
+            // Block still doesn't exist after placement phase — unreachable
             return MovementStatus.UNREACHABLE;
         }
 

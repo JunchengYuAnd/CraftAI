@@ -43,6 +43,12 @@ public class MovementDescend extends Movement {
             if (!canWalkThroughRuntime(dest)) toMine.add(dest);
             if (!canWalkThroughRuntime(destHead)) toMine.add(destHead);
             positionsToMine = toMine.toArray(new BlockPos[0]);
+
+            // If there's pending mining, return RUNNING so the
+            // base class update() handles it before we start descending.
+            if (positionsToMine.length > 0) {
+                return MovementStatus.RUNNING;
+            }
         }
 
         BlockPos feet = playerFeet();

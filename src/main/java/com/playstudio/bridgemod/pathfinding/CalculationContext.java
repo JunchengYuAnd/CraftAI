@@ -47,6 +47,8 @@ public class CalculationContext {
     public final double jumpPenalty;
     // Player reference for mining cost calculation (Phase 3C)
     public final FakePlayer player;  // nullable
+    // Block placement during pathfinding (Phase 3C bridge/pillar)
+    public final boolean hasThrowawayBlock;
 
     // Water features (Baritone)
     public final boolean assumeWalkOnWater;       // Jesus mode / Frost Walker
@@ -70,6 +72,7 @@ public class CalculationContext {
         this.precomputed = PrecomputedData.getInstance();
         this.canSprint = canSprint;
         this.player = (player instanceof FakePlayer fp) ? fp : null;
+        this.hasThrowawayBlock = (this.player != null && this.player.hasThrowawayBlock());
         // Match Baritone defaults
         this.allowDiagonalDescend = true;
         this.allowDiagonalAscend = true;
