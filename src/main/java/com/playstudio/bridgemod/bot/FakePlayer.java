@@ -423,6 +423,9 @@ public class FakePlayer extends ServerPlayer {
         ItemStack stack = this.getMainHandItem();
         if (stack.isEmpty()) return false;
 
+        // Look at the target block (like a real player)
+        lookAt(against);
+
         // Hit point: center of the target face
         Vec3 hitVec = Vec3.atCenterOf(against).add(
                 face.getStepX() * 0.5,
@@ -430,6 +433,10 @@ public class FakePlayer extends ServerPlayer {
                 face.getStepZ() * 0.5
         );
         BlockHitResult hitResult = new BlockHitResult(hitVec, face, against, false);
+
+        // Swing arm (visible to all nearby players)
+        this.swing(InteractionHand.MAIN_HAND);
+
         InteractionResult result = this.gameMode.useItemOn(
                 this, this.serverLevel(), stack, InteractionHand.MAIN_HAND, hitResult
         );

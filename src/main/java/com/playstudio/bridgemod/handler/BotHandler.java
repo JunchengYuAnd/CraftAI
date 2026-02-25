@@ -13,7 +13,9 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
@@ -51,6 +53,7 @@ public class BotHandler {
         messageHandler.registerHandler("bot_dig_abort", this::handleDigAbort);
         messageHandler.registerHandler("bot_place", this::handlePlace);
         messageHandler.registerHandler("bot_equip", this::handleEquip);
+        messageHandler.registerHandler("bot_inventory", this::handleInventory);
     }
 
     /**
@@ -522,6 +525,70 @@ public class BotHandler {
                     : bot.getMainHandItem().getItem().getName(bot.getMainHandItem()).getString();
             data.addProperty("heldItem", heldItem);
             data.addProperty("hasThrowaway", bot.hasThrowawayBlock());
+            server.sendResponse(conn, id, true, data, null);
+        });
+    }
+
+    /**
+     * bot_inventory: Query a bot's inventory contents.
+     * params: {name}
+     */
+    private void handleInventory(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name")) {
+            server.sendResponse(conn, id, false, null, "Missing 'name' parameter");
+            return;
+        }
+
+        String name = params.get("name").getAsString();
+        FakePlayer bot = botManager.getBot(name);
+        if (bot == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+
+        mcServer.execute(() -> {
+            JsonObject data = new JsonObject();
+            JsonArray items = new JsonArray();
+            int emptyCount = 0;
+
+            var menu = bot.inventoryMenu;
+            for (int i = 0; i < menu.slots.size(); i++) {
+                ItemStack stack = menu.slots.get(i).getItem();
+                if (stack.isEmpty()) {
+                    if (i >= 9 && i <= 44) emptyCount++;
+                    continue;
+                }
+
+                JsonObject itemObj = new JsonObject();
+                itemObj.addProperty("slot", i);
+                String itemName = BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath();
+                itemObj.addProperty("name", itemName);
+                itemObj.addProperty("count", stack.getCount());
+
+                if (stack.isDamageableItem()) {
+                    int maxDur = stack.getMaxDamage();
+                    int currentDur = maxDur - stack.getDamageValue();
+                    itemObj.addProperty("durability", currentDur);
+                    itemObj.addProperty("maxDurability", maxDur);
+                }
+
+                items.add(itemObj);
+            }
+
+            data.add("items", items);
+            data.addProperty("emptySlotCount", emptyCount);
+            data.addProperty("selectedSlot", bot.getInventory().selected);
+
+            String heldItem = bot.getMainHandItem().isEmpty() ? "empty"
+                    : BuiltInRegistries.ITEM.getKey(bot.getMainHandItem().getItem()).getPath();
+            data.addProperty("heldItem", heldItem);
+
             server.sendResponse(conn, id, true, data, null);
         });
     }
