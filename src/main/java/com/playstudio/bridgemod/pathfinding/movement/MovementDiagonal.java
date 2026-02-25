@@ -3,6 +3,7 @@ package com.playstudio.bridgemod.pathfinding.movement;
 import com.playstudio.bridgemod.bot.FakePlayer;
 import com.playstudio.bridgemod.pathfinding.moves.MovementHelper;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.phys.Vec3;
 
 /**
  * Execution logic for diagonal movement (1 block diagonal, possibly +/-1 Y).
@@ -60,16 +61,56 @@ public class MovementDiagonal extends Movement {
             }
         }
 
-        // Sprint check (Baritone: check all 4 intermediate positions are passable)
-        bot.setSprinting(canSprintDiagonal());
+        if (dest.getY() > src.getY()) {
+            // === Diagonal ascend execution ===
+            // Don't sprint (reduces residual momentum issues for consecutive diagonal ascends)
+            bot.setSprinting(false);
 
-        moveTowards(dest);
+            // Check which intermediate paths are clear.
+            // Two cardinal intermediates exist: interA (same X as src) and interB (same X as dest).
+            // The cost function requires at least one to be fully passable (3-level clearance).
+            // If one is blocked, the bot must approach via the clear side first, then jump to dest.
+            BlockPos interA = new BlockPos(src.getX(), src.getY(), dest.getZ());
+            BlockPos interB = new BlockPos(dest.getX(), src.getY(), src.getZ());
+            boolean clearA = canWalkThroughRuntime(interA) && canWalkThroughRuntime(interA.above());
+            boolean clearB = canWalkThroughRuntime(interB) && canWalkThroughRuntime(interB.above());
 
-        // Diagonal ascend: always try to jump when dest is above src.
-        // Baritone's condition (bot.getY() < src.getY() + 0.1 && horizontalCollision)
-        // is too restrictive for FakePlayer server-side physics.
-        if (dest.getY() > src.getY() && playerFeet().getY() < dest.getY()) {
-            bot.setMovementInput(1.0f, 0.0f, true);
+            // Phase 1: If one side is blocked, walk toward the clear intermediate first.
+            // Once close enough, fall through to phase 2 (jump toward dest).
+            if (!clearA && clearB) {
+                double dx = (interB.getX() + 0.5) - bot.getX();
+                double dz = (interB.getZ() + 0.5) - bot.getZ();
+                if (dx * dx + dz * dz > 0.4 * 0.4) {
+                    moveTowards(interB);
+                    return MovementStatus.RUNNING;
+                }
+            } else if (!clearB && clearA) {
+                double dx = (interA.getX() + 0.5) - bot.getX();
+                double dz = (interA.getZ() + 0.5) - bot.getZ();
+                if (dx * dx + dz * dz > 0.4 * 0.4) {
+                    moveTowards(interA);
+                    return MovementStatus.RUNNING;
+                }
+            }
+
+            // Phase 2: Both sides clear or past the detour — move to dest and jump.
+            moveTowards(dest);
+
+            if (playerFeet().getY() < dest.getY()) {
+                Vec3 vel = bot.getDeltaMovement();
+                double dx = (dest.getX() + 0.5) - bot.getX();
+                double dz = (dest.getZ() + 0.5) - bot.getZ();
+                double dot = vel.x * dx + vel.z * dz;
+                double speed = Math.sqrt(vel.x * vel.x + vel.z * vel.z);
+                // Jump when velocity is aligned with dest direction, or when hitting the block
+                if ((dot > 0 && speed > 0.08) || bot.horizontalCollision) {
+                    bot.setMovementInput(1.0f, 0.0f, true);
+                }
+            }
+        } else {
+            // === Flat or descend diagonal ===
+            bot.setSprinting(canSprintDiagonal());
+            moveTowards(dest);
         }
 
         return MovementStatus.RUNNING;
