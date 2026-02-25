@@ -116,7 +116,8 @@ public class PrecomputedData {
         // Liquids
         FluidState fluid = state.getFluidState();
         if (fluid.is(Fluids.LAVA) || fluid.is(Fluids.FLOWING_LAVA)) return WTH_NO;
-        if (fluid.is(Fluids.WATER) || fluid.is(Fluids.FLOWING_WATER)) return WTH_YES;
+        // Water: needs position-dependent check (only still, surface, 1-block-deep is passable)
+        if (fluid.is(Fluids.WATER) || fluid.is(Fluids.FLOWING_WATER)) return WTH_MAYBE;
 
         // Snow layers: depends on layer count (per-state, can precompute)
         if (block instanceof SnowLayerBlock) {
@@ -164,10 +165,12 @@ public class PrecomputedData {
         }
         if (block instanceof BedBlock) return WON_YES;
         if (block instanceof CampfireBlock) return WON_YES;
+        // Lily pad: always walkable (Baritone explicit)
+        if (block instanceof WaterlilyBlock) return WON_YES;
 
-        // Water: not walkable
+        // Water: needs position-dependent check (deep water column = walkable floor)
         FluidState fluid = state.getFluidState();
-        if (fluid.is(Fluids.WATER) || fluid.is(Fluids.FLOWING_WATER)) return WON_NO;
+        if (fluid.is(Fluids.WATER) || fluid.is(Fluids.FLOWING_WATER)) return WON_MAYBE;
 
         // Remaining: might be full block via isCollisionShapeFullBlock (rare in vanilla).
         // Covers: barrier block, some modded blocks.

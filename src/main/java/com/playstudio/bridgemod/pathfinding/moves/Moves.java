@@ -4,6 +4,7 @@ import com.playstudio.bridgemod.pathfinding.ActionCosts;
 import com.playstudio.bridgemod.pathfinding.CalculationContext;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.LadderBlock;
 import net.minecraft.world.level.block.VineBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -193,6 +194,8 @@ public enum Moves {
                 } else {
                     if (destOn.getBlock() == Blocks.SOUL_SAND) {
                         WC += (ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST - ActionCosts.WALK_ONE_BLOCK_COST) / 2;
+                    } else if (ctx.assumeWalkOnWater && MovementHelper.isWater(destOn)) {
+                        WC += ctx.walkOnWaterOnePenalty; // Jesus mode: extra cost for walking on water surface
                     }
                     if (srcDownBlock == Blocks.SOUL_SAND) {
                         WC += (ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST - ActionCosts.WALK_ONE_BLOCK_COST) / 2;
@@ -225,56 +228,83 @@ public enum Moves {
     /**
      * Ascend: jump up 1 block.
      * Ported from Baritone's MovementAscend.cost().
-     * Omits: block placement, falling block check, bottom slab jump restriction.
+     * Omits: block placement (Phase 3C).
      */
     static final class MovementAscend {
         static double cost(CalculationContext ctx, int x, int y, int z, int destX, int destZ) {
-            BlockState toBreak1 = ctx.get(destX, y + 1, destZ);  // dest head
-            BlockState toBreak2 = ctx.get(destX, y + 2, destZ);  // dest head+1
-            BlockState srcUp2 = ctx.get(x, y + 2, z);             // src head+1 (need clearance to jump)
-            BlockState destOn = ctx.get(destX, y, destZ);          // block we jump onto
+            BlockState destOn = ctx.get(destX, y, destZ);  // block we jump onto
 
             // Must be able to stand on the destination block
             if (!MovementHelper.canWalkOn(ctx, destX, y, destZ, destOn)) {
+                return ActionCosts.COST_INF;  // Phase 3C: block placement
+            }
+
+            // Baritone: falling block check - sand/gravel at y+3 would fall when y+2 cleared
+            BlockState srcUp2 = ctx.get(x, y + 2, z);
+            if (ctx.get(x, y + 3, z).getBlock() instanceof FallingBlock
+                    && (MovementHelper.canWalkThrough(ctx, x, y + 1, z)
+                        || !(srcUp2.getBlock() instanceof FallingBlock))) {
                 return ActionCosts.COST_INF;
             }
 
-            // Check mining costs for the 3 blocks that need to be clear
-            double hardness1 = MovementHelper.getMiningDurationTicks(ctx, destX, y + 1, destZ, toBreak1, false);
-            if (hardness1 >= ActionCosts.COST_INF) return ActionCosts.COST_INF;
-            double hardness2 = MovementHelper.getMiningDurationTicks(ctx, destX, y + 2, destZ, toBreak2, true);
-            if (hardness2 >= ActionCosts.COST_INF) return ActionCosts.COST_INF;
-            double hardness3 = MovementHelper.getMiningDurationTicks(ctx, x, y + 2, z, srcUp2, true);
-            if (hardness3 >= ActionCosts.COST_INF) return ActionCosts.COST_INF;
-
-            double WC = ActionCosts.WALK_ONE_BLOCK_COST;
             BlockState srcDown = ctx.get(x, y - 1, z);
+            Block srcDownBlock = srcDown.getBlock();
 
-            if (srcDown.getBlock() == Blocks.SOUL_SAND) {
-                WC += (ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST - ActionCosts.WALK_ONE_BLOCK_COST) / 2;
-            }
-            // Jump up 1 block (Baritone uses JUMP_ONE_BLOCK_COST derived from physics)
-            WC += ActionCosts.JUMP_ONE_BLOCK_COST;
-
-            if (srcDown.getBlock() instanceof LadderBlock || srcDown.getBlock() instanceof VineBlock) {
-                hardness1 *= 5;
-                hardness2 *= 5;
-                hardness3 *= 5;
+            // Baritone: can't ascend from ladder/vine
+            if (srcDownBlock instanceof LadderBlock || srcDownBlock instanceof VineBlock) {
+                return ActionCosts.COST_INF;
             }
 
-            return WC + hardness1 + hardness2 + hardness3;
+            // Baritone: bottom slab jump restriction
+            // Standing on bottom slab (feet at y+0.5) can't reach full block at y+1 (1.5 block jump)
+            boolean jumpingFromBottomSlab = MovementHelper.isBottomSlab(srcDown);
+            boolean jumpingToBottomSlab = MovementHelper.isBottomSlab(destOn);
+            if (jumpingFromBottomSlab && !jumpingToBottomSlab) {
+                return ActionCosts.COST_INF;
+            }
+
+            // Baritone cost formula: walking and jumping happen simultaneously → Math.max
+            double walk;
+            if (jumpingToBottomSlab) {
+                if (jumpingFromBottomSlab) {
+                    // Slab-to-slab: normal jump
+                    walk = Math.max(ActionCosts.JUMP_ONE_BLOCK_COST, ActionCosts.WALK_ONE_BLOCK_COST);
+                    walk += ctx.jumpPenalty;
+                } else {
+                    // Full-block-to-slab: step-up (0.5 block rise), no jump needed
+                    walk = ActionCosts.WALK_ONE_BLOCK_COST;
+                }
+            } else {
+                if (destOn.getBlock() == Blocks.SOUL_SAND) {
+                    walk = ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST;
+                } else {
+                    walk = Math.max(ActionCosts.JUMP_ONE_BLOCK_COST, ActionCosts.WALK_ONE_BLOCK_COST);
+                }
+                walk += ctx.jumpPenalty;
+            }
+
+            // Mining costs for 3 blocks (Baritone order: srcUp2, dest feet, dest head)
+            double totalCost = walk;
+            totalCost += MovementHelper.getMiningDurationTicks(ctx, x, y + 2, z, srcUp2, false);
+            if (totalCost >= ActionCosts.COST_INF) return ActionCosts.COST_INF;
+            totalCost += MovementHelper.getMiningDurationTicks(ctx, destX, y + 1, destZ,
+                    ctx.get(destX, y + 1, destZ), false);
+            if (totalCost >= ActionCosts.COST_INF) return ActionCosts.COST_INF;
+            totalCost += MovementHelper.getMiningDurationTicks(ctx, destX, y + 2, destZ,
+                    ctx.get(destX, y + 2, destZ), true);
+            return totalCost;
         }
     }
 
     /**
      * Descend: walk off an edge and fall 1+ blocks.
-     * Ported from Baritone's MovementDescend.cost().
+     * Ported from Baritone's MovementDescend.cost() + dynamicFallCost().
      * Uses MoveResult because the landing Y is dynamic.
-     * Omits: vine/ladder catch during fall, water bucket landing.
+     * Omits: water bucket landing, frost walker.
      */
     static final class MovementDescend {
         static void cost(CalculationContext ctx, int x, int y, int z, int destX, int destZ, MoveResult result) {
-            // Baritone: check 3 blocks in the forward column: y-1 (landing feet), y (step-off feet), y+1 (step-off head)
+            // Baritone: check 3 blocks in the forward column
             BlockState destFeet = ctx.get(destX, y - 1, destZ);   // landing feet position
             BlockState pb0 = ctx.get(destX, y, destZ);            // step-off feet level
             BlockState pb1 = ctx.get(destX, y + 1, destZ);        // step-off head level
@@ -294,21 +324,25 @@ public enum Moves {
                 return;
             }
 
+            BlockState below = ctx.get(destX, y - 2, destZ);
+
             // 1-block descent check
-            if (MovementHelper.canWalkOn(ctx, destX, y - 2, destZ)) {
-                // Check space at landing (y-1 feet, y head)
+            if (MovementHelper.canWalkOn(ctx, destX, y - 2, destZ, below)) {
+                // Baritone: can't land at ladder/vine position
+                if (destFeet.getBlock() instanceof LadderBlock || destFeet.getBlock() instanceof VineBlock) {
+                    return;
+                }
                 if (hardness0 == 0 && hardness1 == 0 && hardness2 == 0) {
-                    // Check for lava
                     if (MovementHelper.isLava(ctx, destX, y - 2, destZ)) return;
 
-                    double totalCost = ActionCosts.WALK_OFF_BLOCK_COST
+                    // Baritone: soul sand multiplies walk-off cost
+                    double walk = ActionCosts.WALK_OFF_BLOCK_COST;
+                    if (srcDownBlock == Blocks.SOUL_SAND) {
+                        walk *= ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST / ActionCosts.WALK_ONE_BLOCK_COST;
+                    }
+                    double totalCost = walk
                             + Math.max(ActionCosts.FALL_N_BLOCKS_COST[1], ActionCosts.CENTER_AFTER_FALL_COST)
                             + hardness0 + hardness1 + hardness2;
-
-                    // Soul sand at source
-                    if (srcDownBlock == Blocks.SOUL_SAND) {
-                        totalCost += (ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST - ActionCosts.WALK_ONE_BLOCK_COST) / 2;
-                    }
 
                     result.x = destX;
                     result.y = y - 1;
@@ -319,53 +353,87 @@ public enum Moves {
                 return;  // Can't mine in descent
             }
 
-            // Check if (destX, y-2, destZ) blocks further falling
-            if (!MovementHelper.canWalkThrough(ctx, destX, y - 2, destZ)) {
-                return;  // Blocked, can't fall further
+            // Not a 1-block descend: check if we can fall further
+            if (!MovementHelper.canWalkThrough(ctx, destX, y - 2, destZ, below)) {
+                return;
             }
 
-            // Multi-block fall
+            // Multi-block fall (Baritone's dynamicFallCost)
             if (hardness0 != 0 || hardness1 != 0 || hardness2 != 0) {
                 return;  // Can't mine during fall
             }
 
-            // Scan downward
+            double frontBreak = hardness0 + hardness1 + hardness2;
+            int effectiveStartHeight = y;
+            double costSoFar = 0;
             int maxFall = ctx.maxFallHeightNoWater;
-            int minY = Math.max(y - maxFall - 1, ctx.getLevel().getMinBuildHeight());
-            for (int landY = y - 3; landY >= minY; landY--) {
-                BlockState landOn = ctx.get(destX, landY, destZ);
-                if (MovementHelper.canWalkOn(ctx, destX, landY, destZ, landOn)) {
-                    // Found landing spot
-                    // Check if space at landing is clear
-                    if (!MovementHelper.canWalkThrough(ctx, destX, landY + 1, destZ)) return;
-                    if (!MovementHelper.canWalkThrough(ctx, destX, landY + 2, destZ)) return;
-                    // Check for lava
-                    if (MovementHelper.isLava(ctx, destX, landY, destZ)) return;
 
-                    int fallHeight = y - 1 - landY;
-                    if (fallHeight > maxFall) return;  // Too high, would take damage
+            for (int fallHeight = 3; ; fallHeight++) {
+                int newY = y - fallHeight;
+                if (newY < ctx.getLevel().getMinBuildHeight()) return;
 
-                    double totalCost = ActionCosts.WALK_OFF_BLOCK_COST
-                            + ActionCosts.FALL_N_BLOCKS_COST[fallHeight]
-                            + ActionCosts.CENTER_AFTER_FALL_COST;
+                BlockState ontoBlock = ctx.get(destX, newY, destZ);
+                int unprotectedFallHeight = fallHeight - (y - effectiveStartHeight);
 
-                    if (srcDownBlock == Blocks.SOUL_SAND) {
-                        totalCost += (ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST - ActionCosts.WALK_ONE_BLOCK_COST) / 2;
-                    }
+                // Bounds check for FALL_N_BLOCKS_COST array
+                if (unprotectedFallHeight >= ActionCosts.FALL_N_BLOCKS_COST.length) return;
 
-                    result.x = destX;
-                    result.y = landY + 1;
-                    result.z = destZ;
-                    result.cost = totalCost;
+                // Baritone: vine/ladder catch - player grabs on if unprotected fall <= 11 blocks
+                Block ontoBlockType = ontoBlock.getBlock();
+                if (unprotectedFallHeight <= 11
+                        && (ontoBlockType instanceof LadderBlock || ontoBlockType instanceof VineBlock)) {
+                    costSoFar += ActionCosts.FALL_N_BLOCKS_COST[Math.max(unprotectedFallHeight - 1, 0)];
+                    costSoFar += ActionCosts.LADDER_DOWN_ONE_COST;
+                    effectiveStartHeight = newY;
+                    continue;
+                }
+
+                // Passable: keep falling
+                if (MovementHelper.canWalkThrough(ctx, destX, newY, destZ, ontoBlock)) {
+                    continue;
+                }
+
+                // Not walkable-on: blocked
+                if (!MovementHelper.canWalkOn(ctx, destX, newY, destZ, ontoBlock)) {
                     return;
                 }
 
-                // Check if we can keep falling through this block
-                if (!MovementHelper.canWalkThrough(ctx, destX, landY, destZ, landOn)) {
-                    return;  // Blocked, can't fall further
+                // Baritone: avoid bottom slabs (glitchy landing)
+                if (MovementHelper.isBottomSlab(ontoBlock)) {
+                    return;
                 }
+
+                // Check safe fall height
+                // Baritone: water landing negates fall damage (4-guard check)
+                if (unprotectedFallHeight > maxFall + 1) {
+                    if (!MovementHelper.isWater(ontoBlock)) {
+                        return;  // Would take fatal fall damage on non-water
+                    }
+                    // Baritone 4-guard for safe water landing:
+                    if (!MovementHelper.canWalkThrough(ctx, destX, newY, destZ, ontoBlock)) return;
+                    if (ctx.assumeWalkOnWater) return; // Jesus mode: can't fall into water
+                    if (MovementHelper.isFlowing(ctx, destX, newY, destZ, ontoBlock)) return;
+                    if (!MovementHelper.canWalkOn(ctx, destX, newY - 1, destZ)) return; // water bottom must exist
+                }
+
+                // Check for lava at landing
+                if (MovementHelper.isLava(ctx, destX, newY, destZ)) return;
+
+                // Baritone: soul sand multiplies walk-off cost
+                double walk = ActionCosts.WALK_OFF_BLOCK_COST;
+                if (srcDownBlock == Blocks.SOUL_SAND) {
+                    walk *= ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST / ActionCosts.WALK_ONE_BLOCK_COST;
+                }
+                double totalCost = walk
+                        + ActionCosts.FALL_N_BLOCKS_COST[unprotectedFallHeight]
+                        + frontBreak + costSoFar;
+
+                result.x = destX;
+                result.y = newY + 1;
+                result.z = destZ;
+                result.cost = totalCost;
+                return;
             }
-            // Fell too far or into void - no valid landing
         }
     }
 
@@ -469,7 +537,7 @@ public enum Moves {
                         || (!BTop && BMid && BLow)) {
                     return;
                 }
-                result.cost = multiplier * ActionCosts.SQRT_2 + ActionCosts.JUMP_ONE_BLOCK_COST;
+                result.cost = multiplier * ActionCosts.SQRT_2 + ctx.jumpPenalty;
                 result.x = destX;
                 result.z = destZ;
                 result.y = y + 1;

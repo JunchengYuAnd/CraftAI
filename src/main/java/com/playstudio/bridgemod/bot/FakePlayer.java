@@ -63,16 +63,35 @@ public class FakePlayer extends ServerPlayer {
      * Player.aiStep() reads from this.input (which is empty for fake players)
      * and sets xxa/zza to 0. Then it calls LivingEntity.aiStep() → travel(xxa, yya, zza).
      * We intercept here and replace with our desired values.
+     *
+     * Water handling: In water, onGround() is false so normal jump doesn't work.
+     * Instead, apply upward velocity to swim toward the surface / maintain height.
      */
     @Override
     public void travel(Vec3 travelVector) {
         if (hasMovementOverride) {
-            // Handle jumping
-            if (moveJumping && this.onGround()) {
-                this.jumpFromGround();
+            if (this.isInWater()) {
+                // In water: always push up to maintain surface position.
+                // Simulates holding jump — required because FakePlayer has no client Input system.
+                Vec3 delta = this.getDeltaMovement();
+                this.setDeltaMovement(delta.x, Math.max(delta.y, 0.04), delta.z);
+            } else if (this.isInLava()) {
+                // In lava: similar upward push
+                Vec3 delta = this.getDeltaMovement();
+                this.setDeltaMovement(delta.x, Math.max(delta.y, 0.04), delta.z);
+            } else {
+                // On land: normal jump
+                if (moveJumping && this.onGround()) {
+                    this.jumpFromGround();
+                }
             }
             super.travel(new Vec3(moveStrafe, travelVector.y, moveForward));
         } else {
+            // No active movement — but tread water to prevent sinking between pathfinding ticks
+            if (this.isInWater()) {
+                Vec3 delta = this.getDeltaMovement();
+                this.setDeltaMovement(delta.x, Math.max(delta.y, 0.02), delta.z);
+            }
             super.travel(travelVector);
         }
     }
@@ -117,6 +136,16 @@ public class FakePlayer extends ServerPlayer {
     @Override
     public void tick() {
         aiStepCalledThisTick = false;
+
+        // Entity.baseTick() MUST run every tick — it updates critical state like
+        // isInWater(), fire, air supply, etc. If ServerPlayer.tick() NPEs before
+        // reaching Entity.tick(), these states never update (e.g. bot ignores water).
+        // Call it explicitly first, then let super.tick() re-run it (baseTick is idempotent).
+        try {
+            this.baseTick();
+        } catch (Exception ignored) {
+        }
+
         try {
             super.tick();
         } catch (NullPointerException e) {

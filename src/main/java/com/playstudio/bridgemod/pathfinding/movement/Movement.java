@@ -3,6 +3,10 @@ package com.playstudio.bridgemod.pathfinding.movement;
 import com.playstudio.bridgemod.bot.FakePlayer;
 import com.playstudio.bridgemod.pathfinding.moves.MovementHelper;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.CarpetBlock;
+import net.minecraft.world.level.block.WaterlilyBlock;
 import net.minecraft.world.level.block.state.BlockState;
 
 /**
@@ -97,20 +101,37 @@ public abstract class Movement {
     /**
      * Check if a block position is passable (no collision shape).
      * Runtime equivalent of MovementHelper.canWalkThrough, using ServerLevel directly.
+     * Must match pathfinding layer's water semantics.
      */
     protected boolean canWalkThroughRuntime(BlockPos pos) {
         BlockState state = bot.serverLevel().getBlockState(pos);
         if (state.isAir()) return true;
+        // Water: only surface still water is passable (matches pathfinding layer)
+        if (state.getBlock() == Blocks.WATER) {
+            if (MovementHelper.isFlowing(state)) return false;
+            BlockState above = bot.serverLevel().getBlockState(pos.above());
+            if (above.getBlock() == Blocks.WATER) return false; // deep water is NOT passable
+            if (above.getBlock() instanceof WaterlilyBlock) return false; // lily pad covers water
+            return true;
+        }
         return state.getCollisionShape(bot.serverLevel(), pos).isEmpty();
     }
 
     /**
      * Check if a block position has a solid collision shape (can stand on).
      * Runtime equivalent of MovementHelper.canWalkOn, using ServerLevel directly.
+     * Must match pathfinding layer's water semantics.
      */
     protected boolean canWalkOnRuntime(BlockPos pos) {
         BlockState state = bot.serverLevel().getBlockState(pos);
         if (state.isAir()) return false;
+        // Water: deep water (water above) acts as walkable floor (matches pathfinding layer)
+        if (state.getBlock() == Blocks.WATER) {
+            Block aboveBlock = bot.serverLevel().getBlockState(pos.above()).getBlock();
+            // Lily pad / carpet on water: always walkable
+            if (aboveBlock instanceof WaterlilyBlock || aboveBlock instanceof CarpetBlock) return true;
+            return aboveBlock == Blocks.WATER; // deep water column → walkable
+        }
         return !state.getCollisionShape(bot.serverLevel(), pos).isEmpty();
     }
 

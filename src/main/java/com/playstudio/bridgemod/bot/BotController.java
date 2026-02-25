@@ -301,7 +301,8 @@ public class BotController {
         boolean canSprint = bot.getFoodData().getFoodLevel() > 6;
 
         // Create context and pre-cache chunks ON THE SERVER THREAD
-        CalculationContext ctx = new CalculationContext(level, canSprint);
+        // Pass bot for Depth Strider enchantment reading
+        CalculationContext ctx = new CalculationContext(level, canSprint, bot);
         ctx.cacheChunksNearby(startX, startZ);
 
         // A* search runs on background thread, reading from cached chunk data

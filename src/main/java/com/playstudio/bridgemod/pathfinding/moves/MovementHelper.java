@@ -41,7 +41,18 @@ public final class MovementHelper {
         int wth = flags & PrecomputedData.WTH_MASK;
         if (wth == PrecomputedData.WTH_YES) return true;
         if (wth == PrecomputedData.WTH_NO) return false;
-        // MAYBE: position-dependent collision shape check
+        // MAYBE: position-dependent check
+        // Baritone water logic: only still, surface (no water above), 1-block-deep water is passable.
+        // Deep water (water above) acts as a wall → forces bot to swim at surface.
+        if (state.getBlock() == Blocks.WATER) {
+            if (isFlowing(ctx, x, y, z, state)) return false;
+            if (ctx.assumeWalkOnWater) return false; // Jesus mode: water is solid
+            BlockState above = ctx.get(x, y + 1, z);
+            if (above.getBlock() == Blocks.WATER) return false; // deep water
+            if (above.getBlock() instanceof WaterlilyBlock) return false; // lily pad covers water
+            return true; // still, surface water — can wade through
+        }
+        // Non-water MAYBE: collision shape check
         return ctx.isPassable(x, y, z);
     }
 
@@ -61,7 +72,23 @@ public final class MovementHelper {
         int won = flags & PrecomputedData.WON_MASK;
         if (won == PrecomputedData.WON_YES) return true;
         if (won == PrecomputedData.WON_NO) return false;
-        // MAYBE: position-dependent isFullBlock check (rare - barrier blocks, etc.)
+        // MAYBE: position-dependent check
+        // Baritone water logic: deep water (water above this block) acts as walkable floor.
+        // The bot "stands" on this block and swims at the surface level above.
+        if (state.getBlock() == Blocks.WATER) {
+            Block aboveBlock = ctx.get(x, y + 1, z).getBlock();
+            // Lily pad / carpet on water: always walkable (Baritone explicit)
+            if (aboveBlock instanceof WaterlilyBlock || aboveBlock instanceof CarpetBlock) return true;
+            // Flowing water: only walkable if deep AND not in Jesus mode
+            if (isFlowing(ctx, x, y, z, state)) {
+                return isWater(aboveBlock) && !ctx.assumeWalkOnWater;
+            }
+            // Still water: XOR trick (Baritone's assumeWalkOnWater)
+            // Normal: deep water (water above) = walkable floor
+            // Jesus mode: surface water (no water above) = walkable, deep water = NOT walkable
+            return isWater(aboveBlock) ^ ctx.assumeWalkOnWater;
+        }
+        // Non-water MAYBE: isFullBlock check (rare - barrier blocks, etc.)
         return ctx.isFullBlock(x, y, z);
     }
 
@@ -116,8 +143,30 @@ public final class MovementHelper {
 
     /**
      * Is this block flowing (not source)?
+     * Simple check without neighbor awareness — used by execution layer.
      */
     public static boolean isFlowing(BlockState state) {
+        FluidState fluid = state.getFluidState();
+        return !fluid.isEmpty() && !fluid.isSource();
+    }
+
+    /**
+     * Enhanced flowing check with neighbor awareness (Baritone's possiblyFlowing).
+     * Even LEVEL==0 (visually still) water is considered flowing if any cardinal
+     * neighbor has LEVEL!=0. This prevents bots from entering water that would push them.
+     */
+    public static boolean isFlowing(CalculationContext ctx, int x, int y, int z, BlockState state) {
+        FluidState fluid = state.getFluidState();
+        if (fluid.isEmpty()) return false;
+        if (!fluid.isSource()) return true; // LEVEL != 0 → definitely flowing
+        // Source block but check if neighbors make it flow (Baritone: possiblyFlowing)
+        return possiblyFlowing(ctx.get(x + 1, y, z))
+                || possiblyFlowing(ctx.get(x - 1, y, z))
+                || possiblyFlowing(ctx.get(x, y, z + 1))
+                || possiblyFlowing(ctx.get(x, y, z - 1));
+    }
+
+    private static boolean possiblyFlowing(BlockState state) {
         FluidState fluid = state.getFluidState();
         return !fluid.isEmpty() && !fluid.isSource();
     }
@@ -130,6 +179,9 @@ public final class MovementHelper {
         if (block instanceof CactusBlock) return true;
         if (block instanceof FireBlock || block instanceof BaseFireBlock) return true;
         if (block == Blocks.LAVA) return true;
+        // Baritone: avoid all liquids (prevents diagonal paths from cutting through water)
+        // Note: MovementDiagonal has explicit "!= Blocks.WATER" exceptions for feet-level water
+        if (block == Blocks.WATER) return true;
         return false;
     }
 

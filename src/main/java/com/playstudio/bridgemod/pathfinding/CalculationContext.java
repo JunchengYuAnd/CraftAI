@@ -4,6 +4,9 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.item.enchantment.EnchantmentHelper;
+import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
@@ -41,6 +44,9 @@ public class CalculationContext {
     public final int maxFallHeightNoWater;
     public final double waterWalkSpeed;
     public final double jumpPenalty;
+    // Water features (Baritone)
+    public final boolean assumeWalkOnWater;       // Jesus mode / Frost Walker
+    public final double walkOnWaterOnePenalty;     // Extra cost for walking on water surface in Jesus mode
 
     // Y bounds cached
     private final int minY;
@@ -51,6 +57,10 @@ public class CalculationContext {
     private final BlockPos.MutableBlockPos pos2 = new BlockPos.MutableBlockPos();
 
     public CalculationContext(ServerLevel level, boolean canSprint) {
+        this(level, canSprint, null);
+    }
+
+    public CalculationContext(ServerLevel level, boolean canSprint, LivingEntity player) {
         this.level = level;
         this.chunkCache = new Long2ObjectOpenHashMap<>(512, 0.5f);
         this.precomputed = PrecomputedData.getInstance();
@@ -59,8 +69,24 @@ public class CalculationContext {
         this.allowDiagonalDescend = true;
         this.allowDiagonalAscend = true;
         this.maxFallHeightNoWater = 3;  // Baritone default: 3 (no fall damage)
-        this.waterWalkSpeed = ActionCosts.WALK_ONE_IN_WATER_COST;  // No Depth Strider
-        this.jumpPenalty = ActionCosts.JUMP_ONE_BLOCK_COST;
+        this.jumpPenalty = 2.0;  // Baritone default: discourages unnecessary jumping
+        // Water features
+        this.assumeWalkOnWater = false;  // Phase 3C: set based on Frost Walker enchantment
+        this.walkOnWaterOnePenalty = 3.0;  // Baritone default: extra cost for Jesus mode water surface
+        // Depth Strider: linear interpolation between water speed and land speed
+        if (player != null) {
+            int depth = EnchantmentHelper.getEnchantmentLevel(Enchantments.DEPTH_STRIDER, player);
+            depth = Math.min(depth, 3);
+            if (depth > 0) {
+                float mult = depth / 3.0f;
+                this.waterWalkSpeed = ActionCosts.WALK_ONE_IN_WATER_COST * (1 - mult)
+                        + ActionCosts.WALK_ONE_BLOCK_COST * mult;
+            } else {
+                this.waterWalkSpeed = ActionCosts.WALK_ONE_IN_WATER_COST;
+            }
+        } else {
+            this.waterWalkSpeed = ActionCosts.WALK_ONE_IN_WATER_COST;  // No Depth Strider
+        }
         this.minY = level.getMinBuildHeight();
         this.maxY = level.getMaxBuildHeight();
     }

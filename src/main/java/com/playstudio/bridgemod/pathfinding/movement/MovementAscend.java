@@ -26,13 +26,23 @@ public class MovementAscend extends Movement {
 
     @Override
     protected MovementStatus updateState() {
-        // Baritone: if fallen below source, movement is impossible
+        // Baritone: if fallen below source, movement is impossible.
+        // Water tolerance: bot Y can float slightly below the integer block boundary
+        // (e.g. Y=60.99 → playerFeet Y=60 while src Y=61). Use raw Y with tolerance.
         if (playerFeet().getY() < src.getY()) {
-            return MovementStatus.UNREACHABLE;
+            if (!bot.isInWater() || bot.getY() < src.getY() - 0.8) {
+                return MovementStatus.UNREACHABLE;
+            }
         }
 
-        // Success check
+        // Success check — also with water tolerance for Y
         if (playerFeet().equals(dest)) {
+            return MovementStatus.SUCCESS;
+        }
+        if (bot.isInWater()
+                && playerFeet().getX() == dest.getX()
+                && playerFeet().getZ() == dest.getZ()
+                && Math.abs(bot.getY() - dest.getY()) < 0.8) {
             return MovementStatus.SUCCESS;
         }
 
