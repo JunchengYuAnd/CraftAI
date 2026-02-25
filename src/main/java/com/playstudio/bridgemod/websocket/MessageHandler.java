@@ -47,6 +47,8 @@ public class MessageHandler {
      * Handle an incoming WebSocket message. Called on WebSocket worker thread.
      */
     public void handleMessage(WebSocket conn, String rawMessage) {
+        // Strip invisible control chars / BOM that terminals may inject
+        rawMessage = rawMessage.strip();
         try {
             JsonObject json = JsonParser.parseString(rawMessage).getAsJsonObject();
 

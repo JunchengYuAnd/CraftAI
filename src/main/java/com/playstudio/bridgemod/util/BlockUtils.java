@@ -3,10 +3,10 @@ package com.playstudio.bridgemod.util;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.playstudio.bridgemod.websocket.Protocol;
-import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 
@@ -69,7 +69,7 @@ public class BlockUtils {
     /**
      * Build the full blockAt response JSON for a given position.
      */
-    public static JsonObject getBlockInfo(ClientLevel level, BlockPos pos) {
+    public static JsonObject getBlockInfo(Level level, BlockPos pos) {
         BlockState state = level.getBlockState(pos);
         Block block = state.getBlock();
         String name = getBlockName(state);

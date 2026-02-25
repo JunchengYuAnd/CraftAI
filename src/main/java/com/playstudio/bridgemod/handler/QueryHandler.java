@@ -14,6 +14,8 @@ import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
@@ -58,78 +60,176 @@ public class QueryHandler {
         int y = params.get("y").getAsInt();
         int z = params.get("z").getAsInt();
 
-        Minecraft.getInstance().execute(() -> {
-            ClientLevel level = Minecraft.getInstance().level;
-            if (level == null) {
-                server.sendResponse(conn, id, false, null, "No world loaded");
-                return;
-            }
-            BlockPos pos = new BlockPos(x, y, z);
-            JsonObject data = BlockUtils.getBlockInfo(level, pos);
-            server.sendResponse(conn, id, true, data, null);
-        });
+        // Use ServerLevel for accurate results (ClientLevel only has client-loaded chunks)
+        MinecraftServer mcServer = Minecraft.getInstance().getSingleplayerServer();
+        if (mcServer != null) {
+            mcServer.execute(() -> {
+                ServerLevel level = mcServer.overworld();
+                BlockPos pos = new BlockPos(x, y, z);
+                JsonObject data = BlockUtils.getBlockInfo(level, pos);
+                server.sendResponse(conn, id, true, data, null);
+            });
+        } else {
+            // Fallback to ClientLevel for dedicated server connections
+            Minecraft.getInstance().execute(() -> {
+                ClientLevel level = Minecraft.getInstance().level;
+                if (level == null) {
+                    server.sendResponse(conn, id, false, null, "No world loaded");
+                    return;
+                }
+                BlockPos pos = new BlockPos(x, y, z);
+                JsonObject data = BlockUtils.getBlockInfo(level, pos);
+                server.sendResponse(conn, id, true, data, null);
+            });
+        }
     }
 
     // --- findBlocks ---
 
+    /**
+     * findBlocks: Search for blocks by name within a radius.
+     * params: {blockNames: [...], center?: {x,y,z}, maxDistance?/radius?: int, count?/maxResults?: int}
+     * If center is omitted, defaults to local player position.
+     */
     private void handleFindBlocks(WebSocket conn, String id, JsonObject params) {
-        JsonArray blockNamesArr = params.getAsJsonArray("blockNames");
+        // Support both "blockNames" and "blockIds" param names
+        JsonArray blockNamesArr = params.has("blockNames") ? params.getAsJsonArray("blockNames")
+                : params.has("blockIds") ? params.getAsJsonArray("blockIds") : null;
+        if (blockNamesArr == null || blockNamesArr.isEmpty()) {
+            server.sendResponse(conn, id, false, null, "Missing 'blockNames' array parameter");
+            return;
+        }
         Set<String> targetNames = new HashSet<>();
         for (var elem : blockNamesArr) {
-            targetNames.add(elem.getAsString());
+            targetNames.add(Protocol.stripNamespace(elem.getAsString()));
         }
-        int maxDistance = params.has("maxDistance") ? params.get("maxDistance").getAsInt() : 64;
-        int count = params.has("count") ? params.get("count").getAsInt() : 100;
 
-        Minecraft.getInstance().execute(() -> {
-            Minecraft mc = Minecraft.getInstance();
-            LocalPlayer player = mc.player;
-            ClientLevel level = mc.level;
-            if (player == null || level == null) {
-                server.sendResponse(conn, id, false, null, "No world loaded");
-                return;
-            }
+        // Support "radius" as alias for "maxDistance"
+        int maxDistance;
+        if (params.has("maxDistance")) maxDistance = params.get("maxDistance").getAsInt();
+        else if (params.has("radius")) maxDistance = params.get("radius").getAsInt();
+        else maxDistance = 64;
 
-            BlockPos center = player.blockPosition();
-            int minX = center.getX() - maxDistance;
-            int maxX = center.getX() + maxDistance;
-            int minY = Math.max(level.getMinBuildHeight(), center.getY() - maxDistance);
-            int maxY = Math.min(level.getMaxBuildHeight() - 1, center.getY() + maxDistance);
-            int minZ = center.getZ() - maxDistance;
-            int maxZ = center.getZ() + maxDistance;
+        // Support "maxResults" as alias for "count"
+        int count;
+        if (params.has("count")) count = params.get("count").getAsInt();
+        else if (params.has("maxResults")) count = params.get("maxResults").getAsInt();
+        else count = 100;
 
-            List<BlockPos> found = new ArrayList<>();
-            BlockPos.MutableBlockPos mutable = new BlockPos.MutableBlockPos();
+        // Parse optional center position
+        final Integer centerX, centerY, centerZ;
+        if (params.has("center") && params.get("center").isJsonObject()) {
+            JsonObject c = params.getAsJsonObject("center");
+            centerX = c.get("x").getAsInt();
+            centerY = c.get("y").getAsInt();
+            centerZ = c.get("z").getAsInt();
+        } else if (params.has("x") && params.has("y") && params.has("z")) {
+            centerX = params.get("x").getAsInt();
+            centerY = params.get("y").getAsInt();
+            centerZ = params.get("z").getAsInt();
+        } else {
+            centerX = null;
+            centerY = null;
+            centerZ = null;
+        }
 
-            for (int bx = minX; bx <= maxX; bx++) {
-                for (int bz = minZ; bz <= maxZ; bz++) {
-                    if (!level.hasChunkAt(mutable.set(bx, 0, bz))) continue;
-                    for (int by = minY; by <= maxY; by++) {
-                        mutable.set(bx, by, bz);
-                        BlockState state = level.getBlockState(mutable);
-                        String name = BlockUtils.getBlockName(state);
-                        if (targetNames.contains(name)) {
-                            found.add(mutable.immutable());
-                        }
+        // Use ServerLevel for accurate results
+        MinecraftServer mcServer = Minecraft.getInstance().getSingleplayerServer();
+        if (mcServer != null) {
+            mcServer.execute(() -> {
+                ServerLevel level = mcServer.overworld();
+
+                // Determine center: explicit > player position
+                BlockPos center;
+                if (centerX != null) {
+                    center = new BlockPos(centerX, centerY, centerZ);
+                } else {
+                    LocalPlayer player = Minecraft.getInstance().player;
+                    if (player != null) {
+                        center = player.blockPosition();
+                    } else {
+                        center = new BlockPos(0, 64, 0);
+                    }
+                }
+
+                List<BlockPos> found = searchBlocks(level, center, targetNames, maxDistance, count);
+
+                JsonObject data = new JsonObject();
+                JsonArray blocks = new JsonArray();
+                for (BlockPos p : found) {
+                    blocks.add(Protocol.vec3(p.getX(), p.getY(), p.getZ()));
+                }
+                data.add("blocks", blocks);
+                server.sendResponse(conn, id, true, data, null);
+            });
+        } else {
+            // Fallback to ClientLevel
+            Minecraft.getInstance().execute(() -> {
+                Minecraft mc = Minecraft.getInstance();
+                LocalPlayer player = mc.player;
+                ClientLevel level = mc.level;
+                if (level == null) {
+                    server.sendResponse(conn, id, false, null, "No world loaded");
+                    return;
+                }
+
+                BlockPos center;
+                if (centerX != null) {
+                    center = new BlockPos(centerX, centerY, centerZ);
+                } else if (player != null) {
+                    center = player.blockPosition();
+                } else {
+                    center = new BlockPos(0, 64, 0);
+                }
+
+                List<BlockPos> found = searchBlocks(level, center, targetNames, maxDistance, count);
+
+                JsonObject data = new JsonObject();
+                JsonArray blocks = new JsonArray();
+                for (BlockPos p : found) {
+                    blocks.add(Protocol.vec3(p.getX(), p.getY(), p.getZ()));
+                }
+                data.add("blocks", blocks);
+                server.sendResponse(conn, id, true, data, null);
+            });
+        }
+    }
+
+    /**
+     * Shared block search logic for both ServerLevel and ClientLevel.
+     */
+    private List<BlockPos> searchBlocks(net.minecraft.world.level.Level level, BlockPos center,
+                                        Set<String> targetNames, int maxDistance, int count) {
+        int minX = center.getX() - maxDistance;
+        int maxX = center.getX() + maxDistance;
+        int minY = Math.max(level.getMinBuildHeight(), center.getY() - maxDistance);
+        int maxY = Math.min(level.getMaxBuildHeight() - 1, center.getY() + maxDistance);
+        int minZ = center.getZ() - maxDistance;
+        int maxZ = center.getZ() + maxDistance;
+
+        List<BlockPos> found = new ArrayList<>();
+        BlockPos.MutableBlockPos mutable = new BlockPos.MutableBlockPos();
+
+        for (int bx = minX; bx <= maxX; bx++) {
+            for (int bz = minZ; bz <= maxZ; bz++) {
+                if (!level.hasChunkAt(mutable.set(bx, 0, bz))) continue;
+                for (int by = minY; by <= maxY; by++) {
+                    mutable.set(bx, by, bz);
+                    BlockState state = level.getBlockState(mutable);
+                    String name = BlockUtils.getBlockName(state);
+                    if (targetNames.contains(name)) {
+                        found.add(mutable.immutable());
                     }
                 }
             }
+        }
 
-            // Sort by squared distance (avoid sqrt)
-            found.sort(Comparator.comparingDouble(p -> p.distSqr(center)));
+        found.sort(Comparator.comparingDouble(p -> p.distSqr(center)));
 
-            if (found.size() > count) {
-                found = found.subList(0, count);
-            }
-
-            JsonObject data = new JsonObject();
-            JsonArray blocks = new JsonArray();
-            for (BlockPos p : found) {
-                blocks.add(Protocol.vec3(p.getX(), p.getY(), p.getZ()));
-            }
-            data.add("blocks", blocks);
-            server.sendResponse(conn, id, true, data, null);
-        });
+        if (found.size() > count) {
+            found = found.subList(0, count);
+        }
+        return found;
     }
 
     // --- getEntities ---
@@ -208,7 +308,7 @@ public class QueryHandler {
             server.sendResponse(conn, id, false, null, "Missing 'itemName' parameter");
             return;
         }
-        String itemName = params.get("itemName").getAsString();
+        String itemName = Protocol.stripNamespace(params.get("itemName").getAsString());
 
         Minecraft.getInstance().execute(() -> {
             Minecraft mc = Minecraft.getInstance();

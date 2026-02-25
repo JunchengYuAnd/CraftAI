@@ -50,6 +50,17 @@ public class Protocol {
     }
 
     /**
+     * Strip namespace prefix from a Minecraft resource ID.
+     * e.g. "minecraft:oak_log" → "oak_log", "oak_log" → "oak_log"
+     * Handles any namespace (e.g. "modname:custom_block" → "custom_block").
+     */
+    public static String stripNamespace(String id) {
+        if (id == null) return null;
+        int colon = id.indexOf(':');
+        return colon >= 0 ? id.substring(colon + 1) : id;
+    }
+
+    /**
      * Build a position/vector object {x, y, z}.
      */
     public static JsonObject vec3(double x, double y, double z) {

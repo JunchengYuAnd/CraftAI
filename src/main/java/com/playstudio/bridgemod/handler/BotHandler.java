@@ -11,7 +11,10 @@ import com.playstudio.bridgemod.websocket.MessageHandler;
 import com.playstudio.bridgemod.websocket.Protocol;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraftforge.event.TickEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import org.java_websocket.WebSocket;
@@ -43,6 +46,11 @@ public class BotHandler {
         messageHandler.registerHandler("bot_list", this::handleList);
         messageHandler.registerHandler("bot_goto", this::handleGoto);
         messageHandler.registerHandler("bot_stop", this::handleStop);
+        messageHandler.registerHandler("bot_break", this::handleBreak);
+        messageHandler.registerHandler("bot_dig", this::handleDig);
+        messageHandler.registerHandler("bot_dig_abort", this::handleDigAbort);
+        messageHandler.registerHandler("bot_place", this::handlePlace);
+        messageHandler.registerHandler("bot_equip", this::handleEquip);
     }
 
     /**
@@ -289,6 +297,232 @@ public class BotHandler {
         mcServer.execute(() -> {
             controller.stop();
             server.sendResponse(conn, id, true, null, null);
+        });
+    }
+
+    /**
+     * bot_break: Break a block at the given position.
+     * params: {name, x, y, z}
+     */
+    private void handleBreak(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name") || !params.has("x") || !params.has("y") || !params.has("z")) {
+            server.sendResponse(conn, id, false, null, "Missing required params (name, x, y, z)");
+            return;
+        }
+
+        String name = params.get("name").getAsString();
+        int x = params.get("x").getAsInt();
+        int y = params.get("y").getAsInt();
+        int z = params.get("z").getAsInt();
+
+        FakePlayer bot = botManager.getBot(name);
+        if (bot == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+
+        mcServer.execute(() -> {
+            BlockPos pos = new BlockPos(x, y, z);
+            BlockState before = bot.serverLevel().getBlockState(pos);
+            boolean success = bot.breakBlock(pos);
+            BlockState after = bot.serverLevel().getBlockState(pos);
+
+            JsonObject data = new JsonObject();
+            data.addProperty("blockBefore", before.getBlock().getName().getString());
+            data.addProperty("blockAfter", after.getBlock().getName().getString());
+            server.sendResponse(conn, id, success, data, success ? null : "Failed to break block");
+        });
+    }
+
+    /**
+     * bot_dig: Progressive block mining (like a real player holding left-click).
+     * params: {name, x, y, z, face?}
+     * Response is sent when digging completes (async, like bot_goto).
+     */
+    private void handleDig(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name") || !params.has("x") || !params.has("y") || !params.has("z")) {
+            server.sendResponse(conn, id, false, null, "Missing required params (name, x, y, z)");
+            return;
+        }
+
+        String name = params.get("name").getAsString();
+        int x = params.get("x").getAsInt();
+        int y = params.get("y").getAsInt();
+        int z = params.get("z").getAsInt();
+
+        // Parse optional face
+        Direction face = null;
+        if (params.has("face")) {
+            String faceStr = params.get("face").getAsString().toLowerCase();
+            switch (faceStr) {
+                case "up":    face = Direction.UP; break;
+                case "down":  face = Direction.DOWN; break;
+                case "north": face = Direction.NORTH; break;
+                case "south": face = Direction.SOUTH; break;
+                case "east":  face = Direction.EAST; break;
+                case "west":  face = Direction.WEST; break;
+                default:
+                    server.sendResponse(conn, id, false, null, "Invalid face: " + faceStr);
+                    return;
+            }
+        }
+
+        FakePlayer bot = botManager.getBot(name);
+        if (bot == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+
+        Direction finalFace = face;
+        mcServer.execute(() -> {
+            BlockPos pos = new BlockPos(x, y, z);
+            String blockType = bot.serverLevel().getBlockState(pos).getBlock().getName().getString();
+
+            bot.startDigging(pos, finalFace, (success, reason) -> {
+                JsonObject data = new JsonObject();
+                data.addProperty("blockType", blockType);
+                data.addProperty("reason", reason != null ? reason : "");
+                data.add("position", Protocol.vec3(x, y, z));
+                server.sendResponse(conn, id, success, data, success ? null : reason);
+            });
+        });
+    }
+
+    /**
+     * bot_dig_abort: Cancel the bot's current digging operation.
+     * params: {name}
+     */
+    private void handleDigAbort(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name")) {
+            server.sendResponse(conn, id, false, null, "Missing 'name' parameter");
+            return;
+        }
+
+        String name = params.get("name").getAsString();
+        FakePlayer bot = botManager.getBot(name);
+        if (bot == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+
+        mcServer.execute(() -> {
+            boolean wasDigging = bot.isDigging();
+            bot.abortDigging();
+
+            JsonObject data = new JsonObject();
+            data.addProperty("wasDigging", wasDigging);
+            server.sendResponse(conn, id, true, data, null);
+        });
+    }
+
+    /**
+     * bot_place: Place a block from the bot's hand.
+     * params: {name, x, y, z, face}
+     * x,y,z = the reference block to click on; face = which face ("up","down","north","south","east","west")
+     */
+    private void handlePlace(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name") || !params.has("x") || !params.has("y") || !params.has("z")) {
+            server.sendResponse(conn, id, false, null, "Missing required params (name, x, y, z)");
+            return;
+        }
+
+        String name = params.get("name").getAsString();
+        int x = params.get("x").getAsInt();
+        int y = params.get("y").getAsInt();
+        int z = params.get("z").getAsInt();
+        String faceStr = params.has("face") ? params.get("face").getAsString() : "up";
+
+        Direction face;
+        switch (faceStr.toLowerCase()) {
+            case "up":    face = Direction.UP; break;
+            case "down":  face = Direction.DOWN; break;
+            case "north": face = Direction.NORTH; break;
+            case "south": face = Direction.SOUTH; break;
+            case "east":  face = Direction.EAST; break;
+            case "west":  face = Direction.WEST; break;
+            default:
+                server.sendResponse(conn, id, false, null, "Invalid face: " + faceStr);
+                return;
+        }
+
+        FakePlayer bot = botManager.getBot(name);
+        if (bot == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+
+        mcServer.execute(() -> {
+            BlockPos against = new BlockPos(x, y, z);
+            boolean success = bot.placeBlock(against, face);
+
+            JsonObject data = new JsonObject();
+            BlockPos placed = against.relative(face);
+            data.addProperty("placedBlock", bot.serverLevel().getBlockState(placed).getBlock().getName().getString());
+            server.sendResponse(conn, id, success, data, success ? null : "Failed to place block");
+        });
+    }
+
+    /**
+     * bot_equip: Switch bot's hotbar slot.
+     * params: {name, slot} — slot 0-8
+     */
+    private void handleEquip(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name")) {
+            server.sendResponse(conn, id, false, null, "Missing 'name' parameter");
+            return;
+        }
+
+        String name = params.get("name").getAsString();
+        FakePlayer bot = botManager.getBot(name);
+        if (bot == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+
+        mcServer.execute(() -> {
+            if (params.has("slot")) {
+                bot.equipToMainHand(params.get("slot").getAsInt());
+            } else if (params.has("throwaway") && params.get("throwaway").getAsBoolean()) {
+                bot.equipThrowaway();
+            }
+
+            JsonObject data = new JsonObject();
+            data.addProperty("selectedSlot", bot.getInventory().selected);
+            String heldItem = bot.getMainHandItem().isEmpty() ? "empty"
+                    : bot.getMainHandItem().getItem().getName(bot.getMainHandItem()).getString();
+            data.addProperty("heldItem", heldItem);
+            data.addProperty("hasThrowaway", bot.hasThrowawayBlock());
+            server.sendResponse(conn, id, true, data, null);
         });
     }
 }
