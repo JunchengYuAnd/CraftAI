@@ -894,6 +894,15 @@ public class BotHandler {
         if (params.has("backoffOnHitTicks")) {
             config.backoffOnHitTicks = params.get("backoffOnHitTicks").getAsInt();
         }
+        if (params.has("threatAwareness")) {
+            config.threatAwareness = params.get("threatAwareness").getAsBoolean();
+        }
+        if (params.has("threatScanRadius")) {
+            config.threatScanRadius = params.get("threatScanRadius").getAsDouble();
+        }
+        if (params.has("threatEvasionWeight")) {
+            config.threatEvasionWeight = params.get("threatEvasionWeight").getAsFloat();
+        }
         return config;
     }
 

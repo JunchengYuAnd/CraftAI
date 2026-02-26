@@ -57,4 +57,9 @@ public class CombatConfig {
     // Distance management
     public float tooCloseRange = 0.0f;    // 0 = disabled; stop forward when closer than this
     public int backoffOnHitTicks = 0;     // 0 = disabled; stop approaching for N ticks after hit
+
+    // Multi-target threat awareness
+    public boolean threatAwareness = false;     // scan nearby threats while fighting primary target
+    public double threatScanRadius = 8.0;       // radius to scan for secondary threats
+    public float threatEvasionWeight = 0.5f;    // 0.0=ignore threats, 1.0=fully threat-driven dodge
 }

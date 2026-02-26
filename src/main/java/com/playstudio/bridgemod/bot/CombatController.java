@@ -13,6 +13,10 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ShieldItem;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BiConsumer;
 
@@ -97,6 +101,16 @@ public class CombatController {
     // Distance management state
     private int backoffTicksRemaining = 0;
 
+    // Multi-target threat awareness
+    private List<ThreatData> nearbyThreats = new ArrayList<>();
+    private Map<Integer, Integer> damageTracker = new HashMap<>(); // entityId → tick when last hit bot
+    private static final int THREAT_MEMORY_TICKS = 60; // forget damage after 3 seconds
+    private static final int MAX_THREATS = 5;
+
+    // Pursuit dodge state (strafe when hit during pathfinding)
+    private int pursuitDodgeTicks = 0;
+    private float pursuitDodgeStrafe = 0.0f;
+
     // Auto-attack nearby hostiles mode
     private boolean autoAttackMode = false;
     private double autoAttackRadius = 32.0;
@@ -111,6 +125,7 @@ public class CombatController {
     private static final double REPATH_DIST_SQ = 4.0;     // re-pathfind when target moves 2+ blocks
     private static final int REPATH_INTERVAL = 20;         // re-pathfind at most every 20 ticks
     private static final int PURSUIT_RANGE = 2;            // GoalNear range for pathfinding
+    private static final double PURSUIT_THREAT_CLOSE = 3.0;  // threats this close → back away
 
     public CombatController(FakePlayer bot, BotController navController) {
         this.bot = bot;
@@ -322,10 +337,134 @@ public class CombatController {
         // Close enough → switch to melee
         if (dist <= MELEE_CLOSE) {
             navController.stop();
+            pursuitDodgeTicks = 0;
             enterMelee();
             return;
         }
 
+        // === Reactive dodge: burst strafe when hit by surprise/ranged attack ===
+        if (config.threatAwareness && pursuitDodgeTicks > 0) {
+            pursuitDodgeTicks--;
+            bot.setMovementInput(0.3f, pursuitDodgeStrafe, false);
+            bot.setSprinting(false);
+            if (pursuitDodgeTicks <= 0) {
+                // Dodge done — proactive evasion or pathfinding will take over next tick
+            }
+            return;
+        }
+
+        // Detect hit → initiate reactive dodge burst (5 ticks)
+        if (config.threatAwareness && bot.hurtTime == 9) {
+            LivingEntity attacker = bot.getLastHurtByMob();
+            if (attacker != null && attacker.isAlive()) {
+                double adx = attacker.getX() - bot.getX();
+                double adz = attacker.getZ() - bot.getZ();
+                float attackerYaw = (float) (Math.atan2(-adx, adz) * 180.0 / Math.PI);
+                float relAngle = attackerYaw - bot.getYRot();
+                while (relAngle > 180) relAngle -= 360;
+                while (relAngle < -180) relAngle += 360;
+
+                pursuitDodgeStrafe = relAngle > 0 ? -1.0f : 1.0f;
+                pursuitDodgeTicks = 5;
+                if (navController.isNavigating()) {
+                    navController.stop();
+                }
+
+                BridgeMod.LOGGER.info("Bot '{}' pursuit dodge: hit by {} (id={}), strafing {}",
+                        bot.getBotName(), attacker.getType().toShortString(),
+                        attacker.getId(), pursuitDodgeStrafe > 0 ? "left" : "right");
+            }
+        }
+
+        // === Target re-evaluation (auto-attack mode only) ===
+        // Check EVERY tick — the bot should always fight the closest hostile,
+        // not charge past nearby zombies to reach a distant target.
+        if (autoAttackMode) {
+            float targetHpPercent = target.getHealth() / target.getMaxHealth();
+            boolean finishingBlow = targetHpPercent < 0.3f;
+
+            if (!finishingBlow) {
+                // Always pick the absolute closest hostile (threshold = 0, just beat current distance)
+                LivingEntity closest = findAbsoluteClosestHostile();
+                if (closest != null && closest != target) {
+                    double closestDist = bot.distanceTo(closest);
+                    // Anti-oscillation: only switch if clearly closer (1+ block difference)
+                    if (closestDist < dist - 1.0) {
+                        BridgeMod.LOGGER.info("Bot '{}' target switch: {} (id={}, dist={}) closer than current (dist={})",
+                                bot.getBotName(), closest.getType().toShortString(),
+                                closest.getId(),
+                                String.format("%.1f", closestDist),
+                                String.format("%.1f", dist));
+                        switchTarget(closest);
+                        return;
+                    }
+                }
+            } else if (bot.hurtTime == 9) {
+                // Finishing blow mode: only switch if attacked by very close mob (< 3 blocks)
+                LivingEntity attacker = bot.getLastHurtByMob();
+                if (attacker != null && attacker != target && attacker.isAlive()
+                        && attacker instanceof Enemy && bot.distanceTo(attacker) < 3.0) {
+                    BridgeMod.LOGGER.info("Bot '{}' target switch (finishing interrupted): {} (id={}, dist={})",
+                            bot.getBotName(), attacker.getType().toShortString(),
+                            attacker.getId(),
+                            String.format("%.1f", bot.distanceTo(attacker)));
+                    switchTarget((LivingEntity) attacker);
+                    return;
+                }
+            }
+        }
+
+        // === Proactive threat evasion: avoid nearby hostiles while pursuing ===
+        // Uses threatScanRadius (default 8) — much earlier detection than waiting to be hit
+        if (config.threatAwareness) {
+            LivingEntity closestThreat = findClosestThreatInRange(config.threatScanRadius);
+            if (closestThreat != null) {
+                double threatDist = bot.distanceTo(closestThreat);
+
+                // Stop pathfinder, use manual evasive movement
+                if (navController.isNavigating()) {
+                    navController.stop();
+                }
+
+                // Strafe away from closest threat
+                double tdx = closestThreat.getX() - bot.getX();
+                double tdz = closestThreat.getZ() - bot.getZ();
+                float threatYaw = (float) (Math.atan2(-tdx, tdz) * 180.0 / Math.PI);
+                float relAngle = threatYaw - bot.getYRot();
+                while (relAngle > 180) relAngle -= 360;
+                while (relAngle < -180) relAngle += 360;
+
+                float strafeDir = relAngle > 0 ? -1.0f : 1.0f;
+
+                // Forward depends on threat proximity:
+                // Very close (< 3) → back away; medium → barely forward; far → normal forward
+                float forward;
+                if (threatDist < PURSUIT_THREAT_CLOSE) {
+                    forward = -0.5f; // back away from close threat
+                } else if (threatDist < config.threatScanRadius * 0.6) {
+                    forward = 0.1f;  // barely creep forward, mostly strafe
+                } else {
+                    forward = 0.4f;  // far threat, still approach target but with strafe
+                }
+
+                bot.setMovementInput(forward, strafeDir * config.strafeIntensity, false);
+                bot.setSprinting(forward > 0);
+
+                // Opportunistic attack while evading
+                attemptNormalAttack(dist);
+
+                if (bot.tickCount % 20 == 0) {
+                    BridgeMod.LOGGER.info("Bot '{}' evasive pursuit: avoiding {} (dist={}), forward={}, target dist={}",
+                            bot.getBotName(), closestThreat.getType().toShortString(),
+                            String.format("%.1f", threatDist),
+                            String.format("%.1f", forward),
+                            String.format("%.1f", dist));
+                }
+                return; // skip normal pathfinding this tick
+            }
+        }
+
+        // === Normal pathfinding pursuit ===
         // Check if target moved significantly → re-pathfind
         if (ticksSinceRepath >= REPATH_INTERVAL) {
             double dx = target.getX() - lastTargetX;
@@ -338,13 +477,75 @@ public class CombatController {
             }
         }
 
-        // Navigation finished but not close enough → re-pursue
+        // Navigation finished or stopped (e.g. evasion just ended) → re-pursue
         if (!navController.isNavigating() && dist > MELEE_CLOSE) {
             startPursuit();
         }
 
         // Try to attack while pursuing (opportunistic)
         attemptNormalAttack(dist);
+    }
+
+    /**
+     * Find the absolute closest hostile within auto-attack radius.
+     * Used for target re-evaluation — always fight the nearest enemy.
+     */
+    private LivingEntity findAbsoluteClosestHostile() {
+        LivingEntity closest = null;
+        double closestDist = autoAttackRadius;
+
+        for (Entity entity : bot.serverLevel().getAllEntities()) {
+            if (!(entity instanceof LivingEntity living)) continue;
+            if (!(entity instanceof Enemy)) continue;
+            if (!living.isAlive()) continue;
+            if (entity == bot) continue;
+
+            double d = bot.distanceTo(entity);
+            if (d < closestDist) {
+                closestDist = d;
+                closest = living;
+            }
+        }
+        return closest;
+    }
+
+    /**
+     * Find the closest hostile (excluding primary target) within a given range.
+     * Used for proactive evasion during pursuit.
+     * Returns null if no threat is within range.
+     */
+    private LivingEntity findClosestThreatInRange(double range) {
+        LivingEntity closest = null;
+        double closestDist = range;
+
+        for (Entity entity : bot.serverLevel().getAllEntities()) {
+            if (!(entity instanceof LivingEntity living)) continue;
+            if (!(entity instanceof Enemy)) continue;
+            if (!living.isAlive()) continue;
+            if (entity == bot || entity == target) continue;
+
+            double d = bot.distanceTo(entity);
+            if (d < closestDist) {
+                closestDist = d;
+                closest = living;
+            }
+        }
+        return closest;
+    }
+
+    /**
+     * Switch to a new target during combat (auto-attack mode).
+     * Stops current navigation and starts pursuing the new target.
+     */
+    private void switchTarget(LivingEntity newTarget) {
+        if (navController.isNavigating()) {
+            navController.stop();
+        }
+        this.targetEntityId = newTarget.getId();
+        this.target = newTarget;
+        this.ticksSinceRepath = 0;
+        lookAtEntity(newTarget);
+        startPursuit();
     }
 
     // ==================== State: MELEE ====================
@@ -374,6 +575,11 @@ public class CombatController {
             handleShieldBreak();
         }
 
+        // === 2.5. Threat awareness: scan nearby hostiles ===
+        if (config.threatAwareness) {
+            scanNearbyThreats();
+        }
+
         // === 3. Compute strafe direction ===
         float strafeValue = computeStrafeValue();
 
@@ -384,9 +590,12 @@ public class CombatController {
             }
         }
 
-        // === 5. Backoff on hit trigger ===
+        // === 5. Backoff on hit trigger (from primary target or any threat) ===
         if (config.backoffOnHitTicks > 0 && bot.hurtTime == 9) {
-            backoffTicksRemaining = config.backoffOnHitTicks;
+            LivingEntity hitBy = bot.getLastHurtByMob();
+            if (hitBy == target || (config.threatAwareness && hitBy != null)) {
+                backoffTicksRemaining = config.backoffOnHitTicks;
+            }
         }
 
         // === 6. Distance management: compute forward ===
@@ -419,9 +628,13 @@ public class CombatController {
     private void tickKBCancel() {
         // Detect new hit
         if (bot.hurtTime == 9 && !kbCancelActive) {
-            // Verify damage came from our combat target (not environment)
+            // Verify damage came from combat target or a known threat (not environment)
             LivingEntity attacker = bot.getLastHurtByMob();
-            if (attacker == null || attacker != target) {
+            if (attacker == null) {
+                return;
+            }
+            // Accept hits from primary target or (if threat awareness on) any mob
+            if (attacker != target && !(config.threatAwareness && attacker instanceof Enemy)) {
                 return;
             }
 
@@ -508,15 +721,97 @@ public class CombatController {
         return true;
     }
 
+    // ==================== Threat Awareness ====================
+
+    /** Data about a nearby secondary threat. */
+    private static class ThreatData {
+        final LivingEntity entity;
+        final double distance;
+        final float relativeAngle; // angle relative to bot's facing (-180 ~ 180)
+
+        ThreatData(LivingEntity entity, double distance, float relativeAngle) {
+            this.entity = entity;
+            this.distance = distance;
+            this.relativeAngle = relativeAngle;
+        }
+    }
+
+    /**
+     * Scan for hostile entities near the bot (excluding primary target).
+     * Updates nearbyThreats list and damageTracker.
+     */
+    private void scanNearbyThreats() {
+        nearbyThreats.clear();
+
+        // Update damage tracker: record who just hit us
+        if (bot.hurtTime == 9) {
+            LivingEntity attacker = bot.getLastHurtByMob();
+            if (attacker != null && attacker != target && attacker.isAlive()) {
+                damageTracker.put(attacker.getId(), bot.tickCount);
+            }
+        }
+
+        // Expire old entries
+        damageTracker.entrySet().removeIf(e ->
+                bot.tickCount - e.getValue() > THREAT_MEMORY_TICKS);
+
+        float botYaw = bot.getYRot();
+
+        for (Entity entity : bot.serverLevel().getAllEntities()) {
+            if (!(entity instanceof LivingEntity living)) continue;
+            if (!(entity instanceof Enemy)) continue;
+            if (!living.isAlive()) continue;
+            if (entity == bot || entity == target) continue;
+
+            double dist = bot.distanceTo(entity);
+            if (dist > config.threatScanRadius) continue;
+
+            // Calculate relative angle
+            double dx = entity.getX() - bot.getX();
+            double dz = entity.getZ() - bot.getZ();
+            float entityYaw = (float) (Math.atan2(-dx, dz) * 180.0 / Math.PI);
+            float relAngle = entityYaw - botYaw;
+            // Normalize to -180 ~ 180
+            while (relAngle > 180) relAngle -= 360;
+            while (relAngle < -180) relAngle += 360;
+
+            nearbyThreats.add(new ThreatData(living, dist, relAngle));
+        }
+
+        // Sort by distance, keep top N
+        nearbyThreats.sort((a, b) -> Double.compare(a.distance, b.distance));
+        if (nearbyThreats.size() > MAX_THREATS) {
+            nearbyThreats.subList(MAX_THREATS, nearbyThreats.size()).clear();
+        }
+
+        // Periodic log (every 2 seconds)
+        if (!nearbyThreats.isEmpty() && bot.tickCount % 40 == 0) {
+            long closeCount = nearbyThreats.stream().filter(t -> t.distance < 3.0).count();
+            ThreatData nearest = nearbyThreats.get(0);
+            BridgeMod.LOGGER.info("Bot '{}' THREATS: {} nearby ({}  close), nearest={} dist={} angle={}",
+                    bot.getBotName(), nearbyThreats.size(), closeCount,
+                    nearest.entity.getType().toShortString(),
+                    String.format("%.1f", nearest.distance),
+                    String.format("%.0f", nearest.relativeAngle));
+        }
+    }
+
     // ==================== Distance Management ====================
 
     /**
-     * Compute forward input based on distance management config.
+     * Compute forward input based on distance management config and threat awareness.
      */
     private float computeForward(double dist, float strafeValue) {
         if (backoffTicksRemaining > 0) {
             backoffTicksRemaining--;
             return -0.3f;
+        }
+        // Threat awareness: retreat when swarmed by 2+ close threats
+        if (config.threatAwareness && !nearbyThreats.isEmpty()) {
+            long closeThreats = nearbyThreats.stream().filter(t -> t.distance < 3.0).count();
+            if (closeThreats >= 2) {
+                return -0.3f;
+            }
         }
         if (config.tooCloseRange > 0.0f && dist < config.tooCloseRange) {
             return 0.0f;
@@ -788,12 +1083,23 @@ public class CombatController {
 
             case INTELLIGENT:
                 // React to incoming hits: reverse direction when hurt
-                if (bot.hurtTime == 9) { // just got hit (hurtTime set to 10, decrements)
+                if (bot.hurtTime == 9) {
                     currentStrafeDirection = -currentStrafeDirection;
                     ticksSinceStrafeChange = 0;
                 } else if (ticksSinceStrafeChange >= config.strafeChangeIntervalTicks) {
                     currentStrafeDirection = ThreadLocalRandom.current().nextBoolean() ? 1.0f : -1.0f;
                     ticksSinceStrafeChange = 0;
+                }
+                // Threat-aware dodging: bias strafe away from nearest secondary threat
+                if (config.threatAwareness && !nearbyThreats.isEmpty()) {
+                    ThreatData nearest = nearbyThreats.get(0);
+                    // Dodge away from the threat's side
+                    float evasionDir = nearest.relativeAngle > 0 ? -1.0f : 1.0f;
+                    // Blend original direction with threat evasion
+                    float w = config.threatEvasionWeight;
+                    currentStrafeDirection = currentStrafeDirection * (1.0f - w) + evasionDir * w;
+                    // Clamp to -1..1
+                    currentStrafeDirection = Math.max(-1.0f, Math.min(1.0f, currentStrafeDirection));
                 }
                 return currentStrafeDirection * config.strafeIntensity;
 
@@ -939,6 +1245,9 @@ public class CombatController {
         stapPhase = StapPhase.APPROACH;
         stapBackTicksRemaining = 0;
         backoffTicksRemaining = 0;
+        pursuitDodgeTicks = 0;
+        nearbyThreats.clear();
+        damageTracker.clear();
 
         // Stop navigation if pursuing
         if (prevState == State.PURSUING && navController.isNavigating()) {
