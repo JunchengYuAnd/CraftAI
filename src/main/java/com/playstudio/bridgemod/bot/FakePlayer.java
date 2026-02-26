@@ -413,6 +413,34 @@ public class FakePlayer extends ServerPlayer {
         this.setXRot(pitch);
     }
 
+    // ==================== Phase 4: Interaction APIs ====================
+
+    /**
+     * Right-click interact with a block (open door/chest, press button, pull lever, etc.).
+     * Uses the same gameMode.useItemOn() as placeBlock, but the intent is interaction, not placement.
+     */
+    public InteractionResult activateBlock(BlockPos target, @Nullable Direction face) {
+        // Distance check: same as real player interaction range (~4.5 blocks)
+        double dist = this.position().distanceTo(Vec3.atCenterOf(target));
+        if (dist > 4.5) {
+            return InteractionResult.FAIL;
+        }
+        lookAt(target);
+        if (face == null) {
+            face = computeBestFace(target);
+        }
+        Vec3 hitVec = Vec3.atCenterOf(target).add(
+                face.getStepX() * 0.5,
+                face.getStepY() * 0.5,
+                face.getStepZ() * 0.5
+        );
+        BlockHitResult hitResult = new BlockHitResult(hitVec, face, target, false);
+        this.swing(InteractionHand.MAIN_HAND);
+        return this.gameMode.useItemOn(
+                this, this.serverLevel(), this.getMainHandItem(), InteractionHand.MAIN_HAND, hitResult
+        );
+    }
+
     // ==================== Phase 3C Step 1: Action APIs ====================
 
     /**

@@ -54,6 +54,7 @@ public class BotHandler {
         messageHandler.registerHandler("bot_place", this::handlePlace);
         messageHandler.registerHandler("bot_equip", this::handleEquip);
         messageHandler.registerHandler("bot_inventory", this::handleInventory);
+        messageHandler.registerHandler("bot_activate", this::handleActivate);
     }
 
     /**
@@ -591,5 +592,100 @@ public class BotHandler {
 
             server.sendResponse(conn, id, true, data, null);
         });
+    }
+
+    // ==================== Phase 4: Interaction Commands ====================
+
+    /**
+     * bot_activate: Right-click interact with a block (open door/chest, press button, pull lever).
+     * params: {name, x, y, z, face?}
+     */
+    private void handleActivate(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name") || !params.has("x") || !params.has("y") || !params.has("z")) {
+            server.sendResponse(conn, id, false, null, "Missing required params (name, x, y, z)");
+            return;
+        }
+
+        String name = params.get("name").getAsString();
+        int x = params.get("x").getAsInt();
+        int y = params.get("y").getAsInt();
+        int z = params.get("z").getAsInt();
+
+        Direction face = null;
+        if (params.has("face")) {
+            face = parseDirection(params.get("face").getAsString());
+            if (face == null) {
+                server.sendResponse(conn, id, false, null, "Invalid face: " + params.get("face").getAsString());
+                return;
+            }
+        }
+
+        FakePlayer bot = botManager.getBot(name);
+        if (bot == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+
+        BotController controller = controllers.get(name);
+        if (controller == null) {
+            server.sendResponse(conn, id, false, null, "No controller for bot '" + name + "'");
+            return;
+        }
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+
+        Direction finalFace = face;
+        mcServer.execute(() -> {
+            BlockPos pos = new BlockPos(x, y, z);
+            double dist = bot.position().distanceTo(net.minecraft.world.phys.Vec3.atCenterOf(pos));
+
+            if (dist <= 4.5) {
+                // Close enough — activate immediately
+                doActivateAndRespond(conn, id, bot, pos, finalFace);
+            } else {
+                // Too far — pathfind to the block first, then activate on arrival
+                if (controller.isNavigating()) {
+                    controller.stop();
+                }
+                controller.startGoto(x, y, z, 2, (success, reason) -> {
+                    if (success) {
+                        doActivateAndRespond(conn, id, bot, pos, finalFace);
+                    } else {
+                        server.sendResponse(conn, id, false, null,
+                                "Failed to reach block: " + reason);
+                    }
+                });
+            }
+        });
+    }
+
+    /** Perform activation and send response. */
+    private void doActivateAndRespond(WebSocket conn, String id, FakePlayer bot, BlockPos pos, Direction face) {
+        String blockName = BuiltInRegistries.BLOCK.getKey(bot.serverLevel().getBlockState(pos).getBlock()).getPath();
+        net.minecraft.world.InteractionResult result = bot.activateBlock(pos, face);
+
+        JsonObject data = new JsonObject();
+        data.addProperty("result", result.name());
+        data.addProperty("blockName", blockName);
+        data.add("position", Protocol.vec3(pos.getX(), pos.getY(), pos.getZ()));
+        server.sendResponse(conn, id, result.consumesAction(), data, null);
+    }
+
+    // --- Helper: parse direction string ---
+    private static Direction parseDirection(String s) {
+        if (s == null) return null;
+        switch (s.toLowerCase()) {
+            case "up":    return Direction.UP;
+            case "down":  return Direction.DOWN;
+            case "north": return Direction.NORTH;
+            case "south": return Direction.SOUTH;
+            case "east":  return Direction.EAST;
+            case "west":  return Direction.WEST;
+            default:      return null;
+        }
     }
 }
