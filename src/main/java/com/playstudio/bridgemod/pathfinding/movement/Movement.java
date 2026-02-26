@@ -205,10 +205,16 @@ public abstract class Movement {
         BlockState state = bot.serverLevel().getBlockState(pos);
         if (state.isAir()) return true;
         // Water: only surface still water is passable (matches pathfinding layer)
-        if (state.getBlock() == Blocks.WATER) {
+        // Uses FluidState to match waterlogged blocks (seagrass, kelp, etc.)
+        if (MovementHelper.isWater(state)) {
+            // Waterlogged blocks with collision shapes (fences, etc.) are NOT passable
+            if (state.getBlock() != Blocks.WATER
+                    && !state.getCollisionShape(bot.serverLevel(), pos).isEmpty()) {
+                return false;
+            }
             if (MovementHelper.isFlowing(state)) return false;
             BlockState above = bot.serverLevel().getBlockState(pos.above());
-            if (above.getBlock() == Blocks.WATER) return false; // deep water is NOT passable
+            if (MovementHelper.isWater(above)) return false; // deep water is NOT passable
             if (above.getBlock() instanceof WaterlilyBlock) return false; // lily pad covers water
             return true;
         }
@@ -224,11 +230,13 @@ public abstract class Movement {
         BlockState state = bot.serverLevel().getBlockState(pos);
         if (state.isAir()) return false;
         // Water: deep water (water above) acts as walkable floor (matches pathfinding layer)
-        if (state.getBlock() == Blocks.WATER) {
-            Block aboveBlock = bot.serverLevel().getBlockState(pos.above()).getBlock();
+        // Uses FluidState to match waterlogged blocks (seagrass, kelp, etc.)
+        if (MovementHelper.isWater(state)) {
+            BlockState aboveState = bot.serverLevel().getBlockState(pos.above());
+            Block aboveBlock = aboveState.getBlock();
             // Lily pad / carpet on water: always walkable
             if (aboveBlock instanceof WaterlilyBlock || aboveBlock instanceof CarpetBlock) return true;
-            return aboveBlock == Blocks.WATER; // deep water column → walkable
+            return MovementHelper.isWater(aboveState); // deep water column → walkable
         }
         return !state.getCollisionShape(bot.serverLevel(), pos).isEmpty();
     }

@@ -45,11 +45,16 @@ public final class MovementHelper {
         // MAYBE: position-dependent check
         // Baritone water logic: only still, surface (no water above), 1-block-deep water is passable.
         // Deep water (water above) acts as a wall → forces bot to swim at surface.
-        if (state.getBlock() == Blocks.WATER) {
+        // Uses FluidState check to match waterlogged blocks (seagrass, kelp, etc.)
+        if (isWater(state)) {
+            // Waterlogged blocks with collision shapes (fences, etc.) are NOT passable
+            if (state.getBlock() != Blocks.WATER && !ctx.isPassable(x, y, z)) {
+                return false;
+            }
             if (isFlowing(ctx, x, y, z, state)) return false;
             if (ctx.assumeWalkOnWater) return false; // Jesus mode: water is solid
             BlockState above = ctx.get(x, y + 1, z);
-            if (above.getBlock() == Blocks.WATER) return false; // deep water
+            if (isWater(above)) return false; // deep water (pure water or waterlogged above)
             if (above.getBlock() instanceof WaterlilyBlock) return false; // lily pad covers water
             return true; // still, surface water — can wade through
         }
@@ -76,18 +81,20 @@ public final class MovementHelper {
         // MAYBE: position-dependent check
         // Baritone water logic: deep water (water above this block) acts as walkable floor.
         // The bot "stands" on this block and swims at the surface level above.
-        if (state.getBlock() == Blocks.WATER) {
-            Block aboveBlock = ctx.get(x, y + 1, z).getBlock();
+        // Uses FluidState check to match waterlogged blocks (seagrass, kelp, etc.)
+        if (isWater(state)) {
+            BlockState aboveState = ctx.get(x, y + 1, z);
+            Block aboveBlock = aboveState.getBlock();
             // Lily pad / carpet on water: always walkable (Baritone explicit)
             if (aboveBlock instanceof WaterlilyBlock || aboveBlock instanceof CarpetBlock) return true;
             // Flowing water: only walkable if deep AND not in Jesus mode
             if (isFlowing(ctx, x, y, z, state)) {
-                return isWater(aboveBlock) && !ctx.assumeWalkOnWater;
+                return isWater(aboveState) && !ctx.assumeWalkOnWater;
             }
             // Still water: XOR trick (Baritone's assumeWalkOnWater)
             // Normal: deep water (water above) = walkable floor
             // Jesus mode: surface water (no water above) = walkable, deep water = NOT walkable
-            return isWater(aboveBlock) ^ ctx.assumeWalkOnWater;
+            return isWater(aboveState) ^ ctx.assumeWalkOnWater;
         }
         // Non-water MAYBE: isFullBlock check (rare - barrier blocks, etc.)
         return ctx.isFullBlock(x, y, z);

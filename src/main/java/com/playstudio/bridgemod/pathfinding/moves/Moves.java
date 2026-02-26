@@ -196,7 +196,7 @@ public enum Moves {
                 // This is a walk, not a bridge
                 double WC = ActionCosts.WALK_ONE_BLOCK_COST;
                 boolean water = false;
-                if (MovementHelper.isWater(pb0.getBlock()) || MovementHelper.isWater(pb1.getBlock())) {
+                if (MovementHelper.isWater(pb0) || MovementHelper.isWater(pb1)) {
                     WC = ctx.waterWalkSpeed;
                     water = true;
                 } else {
@@ -549,9 +549,11 @@ public enum Moves {
             if (cuttingOver2 == Blocks.MAGMA_BLOCK || MovementHelper.isLava(cuttingOver2)) return;
 
             // Check for water (affects cost)
-            Block startIn = ctx.get(x, y, z).getBlock();
+            // Uses FluidState to match waterlogged blocks (seagrass, kelp, etc.)
+            BlockState startInState = ctx.get(x, y, z);
+            Block startIn = startInState.getBlock();
             boolean water = false;
-            if (MovementHelper.isWater(startIn) || MovementHelper.isWater(destInto.getBlock())) {
+            if (MovementHelper.isWater(startInState) || MovementHelper.isWater(destInto)) {
                 if (ascend) return;  // Can't diagonal-ascend in water
                 multiplier = ctx.waterWalkSpeed;
                 water = true;
