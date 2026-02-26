@@ -48,6 +48,15 @@ public class FakePlayer extends ServerPlayer {
     // Equipment sync: track last broadcast held item to detect external changes (/clear, /give, etc.)
     private ItemStack lastBroadcastMainHand = ItemStack.EMPTY;
 
+    // Combat: force getAttackStrengthScale() to return 1.0 during attack()
+    // (vanilla attackStrengthTicker never increments because ServerPlayer.tick()
+    // NPEs before reaching Player.tick())
+    private boolean forceFullAttackStrength = false;
+
+    // Equipment attributes: track last main hand for attribute modifier swap
+    // (collectEquipmentChanges() in LivingEntity.tick() never runs due to same NPE)
+    private ItemStack lastAttributeMainHand = ItemStack.EMPTY;
+
     // Progressive digging state (real player mining simulation)
     private boolean isDigging = false;
     private BlockPos diggingPos = null;
@@ -184,6 +193,17 @@ public class FakePlayer extends ServerPlayer {
             this.aiStep();
         }
 
+        // Manually track fallDistance — ServerPlayer.checkFallDamage() skips
+        // super.checkFallDamage() when isInvulnerableTo(fall) is true (creative mode /
+        // mayfly ability), so fallDistance never updates. We need it for crit detection.
+        // yo = previous tick's Y position (set by Entity.tick())
+        double dy = this.getY() - this.yo;
+        if (!this.onGround() && dy < 0) {
+            this.fallDistance -= (float) dy; // dy is negative, so this adds to fallDistance
+        } else if (this.onGround()) {
+            this.fallDistance = 0;
+        }
+
         // Progressive digging: gameMode.tick() (called in super.tick()) handles crack animation.
         // We track progress and send STOP_DESTROY_BLOCK when it's time to actually break.
         tickDigging();
@@ -201,6 +221,7 @@ public class FakePlayer extends ServerPlayer {
         ItemStack currentMainHand = this.getMainHandItem();
         if (!ItemStack.matches(currentMainHand, lastBroadcastMainHand)) {
             lastBroadcastMainHand = currentMainHand.copy();
+            refreshMainHandAttributes(); // apply attribute modifiers for /give, /clear, etc.
             this.serverLevel().getChunkSource().broadcast(this,
                     new ClientboundSetEquipmentPacket(this.getId(),
                             java.util.List.of(com.mojang.datafixers.util.Pair.of(
@@ -230,6 +251,54 @@ public class FakePlayer extends ServerPlayer {
     @Override
     public boolean isControlledByLocalInstance() {
         return true;
+    }
+
+    /**
+     * Override attack strength scale so Player.attack() applies full damage.
+     * Vanilla's attackStrengthTicker never increments (ServerPlayer.tick() NPEs before
+     * Player.tick()), so the default always returns ~0.1. CombatController sets
+     * forceFullAttackStrength=true around attack() calls to get proper damage.
+     */
+    @Override
+    public float getAttackStrengthScale(float adjustTicks) {
+        if (forceFullAttackStrength) {
+            return 1.0f;
+        }
+        return super.getAttackStrengthScale(adjustTicks);
+    }
+
+    public void setForceFullAttackStrength(boolean force) {
+        this.forceFullAttackStrength = force;
+    }
+
+    /**
+     * Manually apply/remove main hand item attribute modifiers.
+     * Mirrors what LivingEntity.collectEquipmentChanges() → handleEquipmentChanges() does,
+     * but that never runs because ServerPlayer.tick() NPEs before reaching LivingEntity.tick().
+     */
+    public void refreshMainHandAttributes() {
+        ItemStack current = this.getMainHandItem();
+        if (ItemStack.matches(current, lastAttributeMainHand)) return;
+
+        // Remove old item's modifiers
+        if (!lastAttributeMainHand.isEmpty()) {
+            for (var entry : lastAttributeMainHand.getAttributeModifiers(EquipmentSlot.MAINHAND).entries()) {
+                var inst = this.getAttribute(entry.getKey());
+                if (inst != null) inst.removeModifier(entry.getValue());
+            }
+        }
+        // Apply new item's modifiers
+        if (!current.isEmpty()) {
+            for (var entry : current.getAttributeModifiers(EquipmentSlot.MAINHAND).entries()) {
+                var inst = this.getAttribute(entry.getKey());
+                if (inst != null) {
+                    // Remove first in case it already exists (avoid duplicate exception)
+                    inst.removeModifier(entry.getValue());
+                    inst.addTransientModifier(entry.getValue());
+                }
+            }
+        }
+        lastAttributeMainHand = current.copy();
     }
 
     @Override
@@ -413,7 +482,38 @@ public class FakePlayer extends ServerPlayer {
         this.setXRot(pitch);
     }
 
-    // ==================== Phase 4: Interaction APIs ====================
+    // ==================== Phase 4: Combat & Interaction APIs ====================
+
+    /**
+     * Select the best melee weapon from hotbar (slots 0-8).
+     * Picks the item with the highest ATTACK_DAMAGE attribute.
+     * Naturally prefers swords (higher DPS) over axes.
+     */
+    public void selectBestWeapon() {
+        double bestDamage = 0;
+        int bestSlot = -1;
+        for (int i = 0; i < 9; i++) {
+            ItemStack stack = this.getInventory().getItem(i);
+            if (stack.isEmpty()) continue;
+            var modifiers = stack.getAttributeModifiers(EquipmentSlot.MAINHAND);
+            var dmgMods = modifiers.get(
+                    net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE);
+            double damage = 0;
+            for (var mod : dmgMods) {
+                if (mod.getOperation() ==
+                        net.minecraft.world.entity.ai.attributes.AttributeModifier.Operation.ADDITION) {
+                    damage += mod.getAmount();
+                }
+            }
+            if (damage > bestDamage) {
+                bestDamage = damage;
+                bestSlot = i;
+            }
+        }
+        if (bestSlot >= 0) {
+            setSelectedSlot(bestSlot);
+        }
+    }
 
     /**
      * Right-click interact with a block (open door/chest, press button, pull lever, etc.).
@@ -556,6 +656,36 @@ public class FakePlayer extends ServerPlayer {
     }
 
     /**
+     * Find a shield anywhere in the inventory and move it to the offhand slot.
+     * Returns true if a shield was equipped.
+     */
+    public boolean equipShieldToOffhand() {
+        // Already have a shield in offhand?
+        ItemStack offhand = this.getInventory().offhand.get(0);
+        if (offhand.getItem() instanceof net.minecraft.world.item.ShieldItem) {
+            return true;
+        }
+
+        // Search entire inventory for a shield
+        for (int i = 0; i < this.getInventory().getContainerSize(); i++) {
+            ItemStack stack = this.getInventory().getItem(i);
+            if (!stack.isEmpty() && stack.getItem() instanceof net.minecraft.world.item.ShieldItem) {
+                // Move shield to offhand
+                this.getInventory().offhand.set(0, stack.copy());
+                this.getInventory().setItem(i, ItemStack.EMPTY);
+                // Broadcast offhand equipment change
+                this.serverLevel().getChunkSource().broadcast(this,
+                        new ClientboundSetEquipmentPacket(this.getId(),
+                                java.util.List.of(com.mojang.datafixers.util.Pair.of(
+                                        EquipmentSlot.OFFHAND, stack.copy()))));
+                BridgeMod.LOGGER.info("Bot '{}' equipped shield to offhand", getBotName());
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Change the selected hotbar slot and broadcast the held item change to all
      * tracking clients. Direct assignment to inventory.selected doesn't trigger
      * equipment sync packets, so clients never see the tool switch visually.
@@ -563,6 +693,7 @@ public class FakePlayer extends ServerPlayer {
     private void setSelectedSlot(int slot) {
         if (this.getInventory().selected == slot) return;
         this.getInventory().selected = slot;
+        refreshMainHandAttributes(); // apply new weapon's attribute modifiers
         ItemStack mainHand = this.getMainHandItem().copy();
         lastBroadcastMainHand = mainHand;  // update cache to avoid double broadcast in tick()
         this.serverLevel().getChunkSource().broadcast(this,

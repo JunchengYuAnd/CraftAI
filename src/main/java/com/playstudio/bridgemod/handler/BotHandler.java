@@ -5,6 +5,8 @@ import com.google.gson.JsonObject;
 import com.playstudio.bridgemod.BridgeMod;
 import com.playstudio.bridgemod.bot.BotController;
 import com.playstudio.bridgemod.bot.BotManager;
+import com.playstudio.bridgemod.bot.CombatConfig;
+import com.playstudio.bridgemod.bot.CombatController;
 import com.playstudio.bridgemod.bot.FakePlayer;
 import com.playstudio.bridgemod.websocket.BridgeWebSocketServer;
 import com.playstudio.bridgemod.websocket.MessageHandler;
@@ -33,6 +35,7 @@ public class BotHandler {
     private final BridgeWebSocketServer server;
     private final BotManager botManager;
     private final Map<String, BotController> controllers = new ConcurrentHashMap<>();
+    private final Map<String, CombatController> combatControllers = new ConcurrentHashMap<>();
 
     public BotHandler(BridgeWebSocketServer server) {
         this.server = server;
@@ -55,6 +58,9 @@ public class BotHandler {
         messageHandler.registerHandler("bot_equip", this::handleEquip);
         messageHandler.registerHandler("bot_inventory", this::handleInventory);
         messageHandler.registerHandler("bot_activate", this::handleActivate);
+        messageHandler.registerHandler("bot_attack", this::handleAttack);
+        messageHandler.registerHandler("bot_attack_nearby", this::handleAttackNearby);
+        messageHandler.registerHandler("bot_attack_cancel", this::handleAttackCancel);
     }
 
     /**
@@ -64,12 +70,23 @@ public class BotHandler {
     public void onServerTick(TickEvent.ServerTickEvent event) {
         if (event.phase != TickEvent.Phase.END) return;
 
-        for (BotController controller : controllers.values()) {
+        for (Map.Entry<String, BotController> entry : controllers.entrySet()) {
             try {
-                controller.tick();
+                String name = entry.getKey();
+
+                // Tick combat controller first (state machine, attack decisions, re-path)
+                CombatController combat = combatControllers.get(name);
+                if (combat != null) {
+                    combat.tick();
+                }
+
+                // Tick navigation controller (path execution)
+                // During PURSUING: BotController executes the path set by CombatController
+                // During MELEE: BotController.navigating=false → tick() no-ops
+                entry.getValue().tick();
             } catch (Exception e) {
                 BridgeMod.LOGGER.error("Error ticking bot '{}': {}",
-                        controller.getBot().getBotName(), e.getMessage());
+                        entry.getValue().getBot().getBotName(), e.getMessage());
             }
         }
     }
@@ -78,6 +95,8 @@ public class BotHandler {
      * Clean up all bots (called on server/mod shutdown).
      */
     public void shutdown() {
+        combatControllers.values().forEach(CombatController::stop);
+        combatControllers.clear();
         controllers.clear();
         botManager.despawnAll();
     }
@@ -150,8 +169,10 @@ public class BotHandler {
                     return;
                 }
 
-                // Create controller for this bot
-                controllers.put(name, new BotController(bot));
+                // Create controllers for this bot
+                BotController navCtrl = new BotController(bot);
+                controllers.put(name, navCtrl);
+                combatControllers.put(name, new CombatController(bot, navCtrl));
 
                 JsonObject data = new JsonObject();
                 data.addProperty("botName", name);
@@ -183,7 +204,11 @@ public class BotHandler {
         }
 
         mcServer.execute(() -> {
-            // Stop controller first
+            // Stop controllers first
+            CombatController combat = combatControllers.remove(name);
+            if (combat != null) {
+                combat.stop();
+            }
             BotController controller = controllers.remove(name);
             if (controller != null) {
                 controller.stop();
@@ -299,6 +324,11 @@ public class BotHandler {
         }
 
         mcServer.execute(() -> {
+            // Stop combat if active
+            CombatController combat = combatControllers.get(name);
+            if (combat != null) {
+                combat.stop();
+            }
             controller.stop();
             server.sendResponse(conn, id, true, null, null);
         });
@@ -673,6 +703,201 @@ public class BotHandler {
         data.addProperty("blockName", blockName);
         data.add("position", Protocol.vec3(pos.getX(), pos.getY(), pos.getZ()));
         server.sendResponse(conn, id, result.consumesAction(), data, null);
+    }
+
+    /**
+     * bot_attack: Start melee combat with a target entity.
+     * params: {name, entityId}
+     * Async: response sent when combat ends (target dead, escaped, cancelled).
+     */
+    private void handleAttack(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name") || !params.has("entityId")) {
+            server.sendResponse(conn, id, false, null, "Missing required params (name, entityId)");
+            return;
+        }
+
+        String name = params.get("name").getAsString();
+        int entityId = params.get("entityId").getAsInt();
+
+        CombatController combat = combatControllers.get(name);
+        if (combat == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+
+        BotController navCtrl = controllers.get(name);
+        FakePlayer bot = botManager.getBot(name);
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+
+        // Parse optional combat config
+        CombatConfig config = new CombatConfig();
+        if (params.has("mode")) {
+            String mode = params.get("mode").getAsString().toLowerCase();
+            switch (mode) {
+                case "crit": config.attackMode = CombatConfig.AttackMode.CRIT; break;
+                case "wtap": config.attackMode = CombatConfig.AttackMode.WTAP; break;
+                default: config.attackMode = CombatConfig.AttackMode.NORMAL; break;
+            }
+        }
+        if (params.has("strafe")) {
+            String strafe = params.get("strafe").getAsString().toLowerCase();
+            switch (strafe) {
+                case "circle": config.strafeMode = CombatConfig.StrafeMode.CIRCLE; break;
+                case "random": config.strafeMode = CombatConfig.StrafeMode.RANDOM; break;
+                case "intelligent": config.strafeMode = CombatConfig.StrafeMode.INTELLIGENT; break;
+                default: config.strafeMode = CombatConfig.StrafeMode.NONE; break;
+            }
+        }
+        if (params.has("strafeIntensity")) {
+            config.strafeIntensity = params.get("strafeIntensity").getAsFloat();
+        }
+        if (params.has("strafeChangeInterval")) {
+            config.strafeChangeIntervalTicks = params.get("strafeChangeInterval").getAsInt();
+        }
+        if (params.has("shieldBreaking")) {
+            config.shieldBreaking = params.get("shieldBreaking").getAsBoolean();
+        }
+        if (params.has("autoShield")) {
+            config.autoShield = params.get("autoShield").getAsBoolean();
+        }
+
+        final CombatConfig finalConfig = config;
+        mcServer.execute(() -> {
+            // Stop any current navigation or combat
+            if (navCtrl != null && navCtrl.isNavigating()) {
+                navCtrl.stop();
+            }
+
+            combat.startAttack(entityId, finalConfig, (success, reason) -> {
+                JsonObject data = new JsonObject();
+                data.addProperty("targetDead", success);
+                data.addProperty("reason", reason != null ? reason : "");
+                if (bot != null) {
+                    data.add("position", Protocol.vec3(bot.getX(), bot.getY(), bot.getZ()));
+                }
+                server.sendResponse(conn, id, success, data, success ? null : reason);
+            });
+        });
+    }
+
+    /**
+     * bot_attack_cancel: Stop the bot's current combat.
+     * params: {name}
+     */
+    private void handleAttackCancel(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name")) {
+            server.sendResponse(conn, id, false, null, "Missing 'name' parameter");
+            return;
+        }
+
+        String name = params.get("name").getAsString();
+        CombatController combat = combatControllers.get(name);
+        if (combat == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+
+        mcServer.execute(() -> {
+            boolean wasActive = combat.isActive();
+            combat.stop();
+            JsonObject data = new JsonObject();
+            data.addProperty("wasFighting", wasActive);
+            server.sendResponse(conn, id, true, data, null);
+        });
+    }
+
+    /**
+     * bot_attack_nearby: Auto-attack all hostile mobs within radius.
+     * Async: response sent when all hostiles dead or cancelled.
+     * params: {name, radius?, mode?, strafe?, shieldBreaking?, autoShield?}
+     */
+    private void handleAttackNearby(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name")) {
+            server.sendResponse(conn, id, false, null, "Missing 'name' parameter");
+            return;
+        }
+
+        String name = params.get("name").getAsString();
+        double radius = params.has("radius") ? params.get("radius").getAsDouble() : 32.0;
+
+        CombatController combat = combatControllers.get(name);
+        if (combat == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+
+        BotController navCtrl = controllers.get(name);
+        FakePlayer bot = botManager.getBot(name);
+
+        // Parse combat config (same as bot_attack)
+        CombatConfig config = new CombatConfig();
+        if (params.has("mode")) {
+            String mode = params.get("mode").getAsString().toLowerCase();
+            switch (mode) {
+                case "crit": config.attackMode = CombatConfig.AttackMode.CRIT; break;
+                case "wtap": config.attackMode = CombatConfig.AttackMode.WTAP; break;
+                default: config.attackMode = CombatConfig.AttackMode.NORMAL; break;
+            }
+        }
+        if (params.has("strafe")) {
+            String strafe = params.get("strafe").getAsString().toLowerCase();
+            switch (strafe) {
+                case "circle": config.strafeMode = CombatConfig.StrafeMode.CIRCLE; break;
+                case "random": config.strafeMode = CombatConfig.StrafeMode.RANDOM; break;
+                case "intelligent": config.strafeMode = CombatConfig.StrafeMode.INTELLIGENT; break;
+                default: config.strafeMode = CombatConfig.StrafeMode.NONE; break;
+            }
+        }
+        if (params.has("strafeIntensity")) {
+            config.strafeIntensity = params.get("strafeIntensity").getAsFloat();
+        }
+        if (params.has("strafeChangeInterval")) {
+            config.strafeChangeIntervalTicks = params.get("strafeChangeInterval").getAsInt();
+        }
+        if (params.has("shieldBreaking")) {
+            config.shieldBreaking = params.get("shieldBreaking").getAsBoolean();
+        }
+        if (params.has("autoShield")) {
+            config.autoShield = params.get("autoShield").getAsBoolean();
+        }
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+
+        final CombatConfig finalConfig = config;
+        final double finalRadius = radius;
+        mcServer.execute(() -> {
+            if (navCtrl != null && navCtrl.isNavigating()) {
+                navCtrl.stop();
+            }
+
+            combat.startAutoAttack(finalConfig, finalRadius, (success, reason) -> {
+                JsonObject data = new JsonObject();
+                // reason format: "all_clear:3" or "cancelled:2"
+                String[] parts = reason.split(":");
+                data.addProperty("reason", parts[0]);
+                int kills = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+                data.addProperty("killCount", kills);
+                if (bot != null) {
+                    data.add("position", Protocol.vec3(bot.getX(), bot.getY(), bot.getZ()));
+                }
+                server.sendResponse(conn, id, success, data, success ? null : parts[0]);
+            });
+        });
     }
 
     // --- Helper: parse direction string ---
