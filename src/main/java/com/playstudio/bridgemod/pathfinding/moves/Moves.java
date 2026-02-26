@@ -14,7 +14,7 @@ import net.minecraft.world.level.block.state.BlockState;
  * Ported from Baritone's Moves enum.
  *
  * Phase 3B: 16 movement types (4 traverse + 4 ascend + 4 descend + 4 diagonal).
- * Phase 3C: +1 PILLAR_UP + 4 PARKOUR = 21 total.
+ * Phase 3C: +1 PILLAR_UP + 1 DOWNWARD + 4 PARKOUR = 22 total.
  *
  * Omissions vs Baritone (Phase 3B): no block placing (bridge/pillar), no mining,
  * no parkour, no frost walker. These are all Phase 3C.
@@ -133,6 +133,14 @@ public enum Moves {
         @Override
         public double cost(CalculationContext ctx, int x, int y, int z) {
             return MovementPillar.cost(ctx, x, y, z);
+        }
+    },
+
+    // --- Downward (mine floor, fall straight down) - dynamicY ---
+    DOWNWARD(0, -1, 0, false, true) {
+        @Override
+        public void apply(CalculationContext ctx, int x, int y, int z, MoveResult result) {
+            MovementDownward.cost(ctx, x, y, z, result);
         }
     },
 
@@ -726,6 +734,66 @@ public enum Moves {
             }
 
             return ActionCosts.JUMP_ONE_BLOCK_COST + placeCost + ctx.jumpPenalty + hardness;
+        }
+    }
+
+    /**
+     * Downward: mine the floor block and fall straight down.
+     * Same XZ, Y decreases by 1+ (dynamicY based on fall distance).
+     *
+     * Process: mine block at (x, y-1, z) (the floor) → fall → land on solid block below.
+     * Scans downward to find the landing block, accumulating fall cost.
+     *
+     * Key design:
+     * - Only activates when floor is solid (mineCost > 0); if already passable, DESCEND handles it.
+     * - Supports multi-block falls (e.g., mining floor above a cave).
+     * - Fall damage check: rejects falls exceeding maxFallHeightNoWater.
+     * - No water landing support (DESCEND handles those cases better).
+     */
+    static final class MovementDownward {
+        static void cost(CalculationContext ctx, int x, int y, int z, MoveResult result) {
+            // Block at y-1: the floor under feet (must mine it)
+            BlockState floor = ctx.get(x, y - 1, z);
+            double mineCost = MovementHelper.getMiningDurationTicks(ctx, x, y - 1, z, floor, false);
+            if (mineCost >= ActionCosts.COST_INF) return;
+
+            // If floor is already passable, DESCEND/fall handles this — not DOWNWARD
+            if (mineCost == 0) return;
+
+            // Scan down from y-2 to find landing block
+            for (int depth = 2; ; depth++) {
+                int checkY = y - depth;
+                if (checkY < ctx.getLevel().getMinBuildHeight()) return;
+
+                int fallBlocks = depth - 1;  // e.g. depth=2 → 1-block fall
+                if (fallBlocks >= ActionCosts.FALL_N_BLOCKS_COST.length) return;
+
+                BlockState state = ctx.get(x, checkY, z);
+
+                // Solid block: potential landing
+                if (MovementHelper.canWalkOn(ctx, x, checkY, z, state)) {
+                    // Fall damage check (no water landing in DOWNWARD)
+                    if (fallBlocks > ctx.maxFallHeightNoWater) return;
+
+                    // Avoid lava and bottom slabs (glitchy landing)
+                    if (MovementHelper.isLava(ctx, x, checkY, z)) return;
+                    if (MovementHelper.isBottomSlab(state)) return;
+
+                    result.x = x;
+                    result.y = checkY + 1;  // feet position = one above landing block
+                    result.z = z;
+                    result.cost = mineCost + ActionCosts.FALL_N_BLOCKS_COST[fallBlocks];
+                    return;
+                }
+
+                // Passable: keep falling
+                if (MovementHelper.canWalkThrough(ctx, x, checkY, z, state)) {
+                    continue;
+                }
+
+                // Not passable and not walkable-on: blocked
+                return;
+            }
         }
     }
 

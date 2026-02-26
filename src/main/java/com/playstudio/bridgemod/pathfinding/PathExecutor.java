@@ -246,6 +246,9 @@ public class PathExecutor {
             case PILLAR_UP:
                 return new MovementPillar(bot, src, dest);
 
+            case DOWNWARD:
+                return new MovementDownward(bot, src, dest);
+
             case PARKOUR_NORTH:
             case PARKOUR_SOUTH:
             case PARKOUR_EAST:
@@ -269,6 +272,8 @@ public class PathExecutor {
             return new MovementPillar(bot, src, dest);
         } else if (dy > 0) {
             return new MovementAscend(bot, src, dest);
+        } else if (dy < 0 && dx == 0 && dz == 0) {
+            return new MovementDownward(bot, src, dest);
         } else if (dy < 0) {
             return new MovementDescend(bot, src, dest);
         } else if (dy == 0 && (dx + dz >= 2) && (dx == 0 || dz == 0)) {
