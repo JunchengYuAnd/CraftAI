@@ -735,38 +735,7 @@ public class BotHandler {
         }
 
         // Parse optional combat config
-        CombatConfig config = new CombatConfig();
-        if (params.has("mode")) {
-            String mode = params.get("mode").getAsString().toLowerCase();
-            switch (mode) {
-                case "crit": config.attackMode = CombatConfig.AttackMode.CRIT; break;
-                case "wtap": config.attackMode = CombatConfig.AttackMode.WTAP; break;
-                default: config.attackMode = CombatConfig.AttackMode.NORMAL; break;
-            }
-        }
-        if (params.has("strafe")) {
-            String strafe = params.get("strafe").getAsString().toLowerCase();
-            switch (strafe) {
-                case "circle": config.strafeMode = CombatConfig.StrafeMode.CIRCLE; break;
-                case "random": config.strafeMode = CombatConfig.StrafeMode.RANDOM; break;
-                case "intelligent": config.strafeMode = CombatConfig.StrafeMode.INTELLIGENT; break;
-                default: config.strafeMode = CombatConfig.StrafeMode.NONE; break;
-            }
-        }
-        if (params.has("strafeIntensity")) {
-            config.strafeIntensity = params.get("strafeIntensity").getAsFloat();
-        }
-        if (params.has("strafeChangeInterval")) {
-            config.strafeChangeIntervalTicks = params.get("strafeChangeInterval").getAsInt();
-        }
-        if (params.has("shieldBreaking")) {
-            config.shieldBreaking = params.get("shieldBreaking").getAsBoolean();
-        }
-        if (params.has("autoShield")) {
-            config.autoShield = params.get("autoShield").getAsBoolean();
-        }
-
-        final CombatConfig finalConfig = config;
+        final CombatConfig finalConfig = parseCombatConfig(params);
         mcServer.execute(() -> {
             // Stop any current navigation or combat
             if (navCtrl != null && navCtrl.isNavigating()) {
@@ -840,13 +809,44 @@ public class BotHandler {
         BotController navCtrl = controllers.get(name);
         FakePlayer bot = botManager.getBot(name);
 
-        // Parse combat config (same as bot_attack)
+        // Parse combat config
+        final CombatConfig finalConfig = parseCombatConfig(params);
+
+        MinecraftServer mcServer = getServer();
+        if (mcServer == null) {
+            server.sendResponse(conn, id, false, null, "No server available");
+            return;
+        }
+        final double finalRadius = radius;
+        mcServer.execute(() -> {
+            if (navCtrl != null && navCtrl.isNavigating()) {
+                navCtrl.stop();
+            }
+
+            combat.startAutoAttack(finalConfig, finalRadius, (success, reason) -> {
+                JsonObject data = new JsonObject();
+                // reason format: "all_clear:3" or "cancelled:2"
+                String[] parts = reason.split(":");
+                data.addProperty("reason", parts[0]);
+                int kills = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+                data.addProperty("killCount", kills);
+                if (bot != null) {
+                    data.add("position", Protocol.vec3(bot.getX(), bot.getY(), bot.getZ()));
+                }
+                server.sendResponse(conn, id, success, data, success ? null : parts[0]);
+            });
+        });
+    }
+
+    // --- Helper: parse CombatConfig from WebSocket params ---
+    private static CombatConfig parseCombatConfig(JsonObject params) {
         CombatConfig config = new CombatConfig();
         if (params.has("mode")) {
             String mode = params.get("mode").getAsString().toLowerCase();
             switch (mode) {
                 case "crit": config.attackMode = CombatConfig.AttackMode.CRIT; break;
                 case "wtap": config.attackMode = CombatConfig.AttackMode.WTAP; break;
+                case "stap": config.attackMode = CombatConfig.AttackMode.STAP; break;
                 default: config.attackMode = CombatConfig.AttackMode.NORMAL; break;
             }
         }
@@ -871,33 +871,30 @@ public class BotHandler {
         if (params.has("autoShield")) {
             config.autoShield = params.get("autoShield").getAsBoolean();
         }
-
-        MinecraftServer mcServer = getServer();
-        if (mcServer == null) {
-            server.sendResponse(conn, id, false, null, "No server available");
-            return;
-        }
-
-        final CombatConfig finalConfig = config;
-        final double finalRadius = radius;
-        mcServer.execute(() -> {
-            if (navCtrl != null && navCtrl.isNavigating()) {
-                navCtrl.stop();
+        if (params.has("kbCancel")) {
+            String kbc = params.get("kbCancel").getAsString().toLowerCase();
+            switch (kbc) {
+                case "jump": config.kbCancelMode = CombatConfig.KBCancelMode.JUMP; break;
+                case "shift": config.kbCancelMode = CombatConfig.KBCancelMode.SHIFT; break;
+                default: config.kbCancelMode = CombatConfig.KBCancelMode.NONE; break;
             }
-
-            combat.startAutoAttack(finalConfig, finalRadius, (success, reason) -> {
-                JsonObject data = new JsonObject();
-                // reason format: "all_clear:3" or "cancelled:2"
-                String[] parts = reason.split(":");
-                data.addProperty("reason", parts[0]);
-                int kills = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
-                data.addProperty("killCount", kills);
-                if (bot != null) {
-                    data.add("position", Protocol.vec3(bot.getX(), bot.getY(), bot.getZ()));
-                }
-                server.sendResponse(conn, id, success, data, success ? null : parts[0]);
-            });
-        });
+        }
+        if (params.has("kbCancelShiftTicks")) {
+            config.kbCancelShiftTicks = params.get("kbCancelShiftTicks").getAsInt();
+        }
+        if (params.has("reactionaryCrit")) {
+            config.reactionaryCrit = params.get("reactionaryCrit").getAsBoolean();
+        }
+        if (params.has("stapBackTicks")) {
+            config.stapBackTicks = params.get("stapBackTicks").getAsInt();
+        }
+        if (params.has("tooCloseRange")) {
+            config.tooCloseRange = params.get("tooCloseRange").getAsFloat();
+        }
+        if (params.has("backoffOnHitTicks")) {
+            config.backoffOnHitTicks = params.get("backoffOnHitTicks").getAsInt();
+        }
+        return config;
     }
 
     // --- Helper: parse direction string ---

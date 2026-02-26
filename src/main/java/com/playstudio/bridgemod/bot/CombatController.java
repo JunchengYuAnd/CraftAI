@@ -81,6 +81,22 @@ public class CombatController {
     private int shieldBreakCooldown = 0;    // ticks remaining before switching back
     private boolean isShielding = false;    // whether bot is currently blocking
 
+    // KB Cancel state
+    private boolean kbCancelActive = false;
+    private int kbCancelTicksRemaining = 0;
+
+    // Reactionary Crit state
+    private boolean reactionaryCritActive = false;
+    private int reactionaryCritTicks = 0;
+
+    // S-tap state
+    private enum StapPhase { APPROACH, BACKING, RE_ENGAGE }
+    private StapPhase stapPhase = StapPhase.APPROACH;
+    private int stapBackTicksRemaining = 0;
+
+    // Distance management state
+    private int backoffTicksRemaining = 0;
+
     // Auto-attack nearby hostiles mode
     private boolean autoAttackMode = false;
     private double autoAttackRadius = 32.0;
@@ -336,13 +352,17 @@ public class CombatController {
     private void tickMelee(double dist) {
         // Target moved out of range → resume pursuit
         if (dist > MELEE_EXIT) {
-            resetCritState();
-            stopShielding();
+            resetAllMeleeState();
             startPursuit();
             return;
         }
 
-        // === Shield Breaking: detect opponent blocking → switch to axe ===
+        // === 1. KB Cancel: react to being hit (highest priority) ===
+        if (config.kbCancelMode != CombatConfig.KBCancelMode.NONE) {
+            tickKBCancel();
+        }
+
+        // === 2. Shield Breaking: detect opponent blocking → switch to axe ===
         if (shieldBreakCooldown > 0) {
             shieldBreakCooldown--;
             if (shieldBreakCooldown == 0 && previousWeaponSlot >= 0) {
@@ -354,34 +374,164 @@ public class CombatController {
             handleShieldBreak();
         }
 
-        // === Compute strafe direction ===
+        // === 3. Compute strafe direction ===
         float strafeValue = computeStrafeValue();
 
-        // === Dispatch to attack mode ===
+        // === 4. Reactionary Crit: opportunistic crit when knocked airborne ===
+        if (config.reactionaryCrit) {
+            if (tickReactionaryCrit(dist)) {
+                return; // crit executed or waiting; skip normal attack mode
+            }
+        }
+
+        // === 5. Backoff on hit trigger ===
+        if (config.backoffOnHitTicks > 0 && bot.hurtTime == 9) {
+            backoffTicksRemaining = config.backoffOnHitTicks;
+        }
+
+        // === 6. Distance management: compute forward ===
+        float computedForward = computeForward(dist, strafeValue);
+
+        // === 7. Dispatch to attack mode ===
         switch (config.attackMode) {
             case CRIT:
-                tickCritAttack(dist, strafeValue);
+                tickCritAttack(dist, strafeValue, computedForward);
                 break;
             case WTAP:
-                tickWtapAttack(dist, strafeValue);
+                tickWtapAttack(dist, strafeValue, computedForward);
+                break;
+            case STAP:
+                tickStapAttack(dist, strafeValue, computedForward);
                 break;
             default:
-                tickNormalMelee(dist, strafeValue);
+                tickNormalMelee(dist, strafeValue, computedForward);
                 break;
         }
 
-        // === Auto-shield between attacks ===
+        // === 8. Auto-shield between attacks ===
         if (config.autoShield) {
             tickAutoShield();
         }
     }
 
+    // ==================== KB Cancel ====================
+
+    private void tickKBCancel() {
+        // Detect new hit
+        if (bot.hurtTime == 9 && !kbCancelActive) {
+            // Verify damage came from our combat target (not environment)
+            LivingEntity attacker = bot.getLastHurtByMob();
+            if (attacker == null || attacker != target) {
+                return;
+            }
+
+            kbCancelActive = true;
+
+            if (config.kbCancelMode == CombatConfig.KBCancelMode.JUMP) {
+                // Sprint + jump forward to counter knockback with momentum
+                bot.setSprinting(true);
+                bot.setMovementInput(1.0f, 0.0f, true);
+                kbCancelTicksRemaining = 1;
+                BridgeMod.LOGGER.debug("Bot '{}' KB CANCEL JUMP triggered (attacker={})",
+                        bot.getBotName(), attacker.getId());
+
+                // Reset attack sub-states (positioning is disrupted)
+                resetCritState();
+                stapPhase = StapPhase.APPROACH;
+                stapBackTicksRemaining = 0;
+            } else if (config.kbCancelMode == CombatConfig.KBCancelMode.SHIFT) {
+                // Sneak to reduce knockback received
+                bot.setShiftKeyDown(true);
+                kbCancelTicksRemaining = config.kbCancelShiftTicks;
+                BridgeMod.LOGGER.debug("Bot '{}' KB CANCEL SHIFT triggered ({} ticks, attacker={})",
+                        bot.getBotName(), config.kbCancelShiftTicks, attacker.getId());
+            }
+        }
+
+        // Tick down active KB cancel
+        if (kbCancelActive && kbCancelTicksRemaining > 0) {
+            kbCancelTicksRemaining--;
+            if (kbCancelTicksRemaining <= 0) {
+                kbCancelActive = false;
+                if (config.kbCancelMode == CombatConfig.KBCancelMode.SHIFT) {
+                    bot.setShiftKeyDown(false);
+                }
+            }
+        }
+    }
+
+    // ==================== Reactionary Crit ====================
+
+    /**
+     * Opportunistic crit when knocked airborne by an enemy hit.
+     * Returns true if reactionary crit is active (skip normal attack mode).
+     */
+    private boolean tickReactionaryCrit(double dist) {
+        // Detect being knocked into the air
+        if (bot.hurtTime == 9 && !bot.onGround()) {
+            reactionaryCritActive = true;
+            reactionaryCritTicks = 0;
+        }
+
+        if (!reactionaryCritActive) {
+            return false;
+        }
+
+        reactionaryCritTicks++;
+
+        // Give up after 12 ticks or landing
+        if (reactionaryCritTicks > 12 || bot.onGround()) {
+            reactionaryCritActive = false;
+            reactionaryCritTicks = 0;
+            return false;
+        }
+
+        // Wait for falling: past apex, actually descending
+        Vec3 vel = bot.getDeltaMovement();
+        if (bot.fallDistance > 0.0f && vel.y <= -0.25) {
+            float requiredDelay = getHeldItemAttackDelay();
+            if (ticksSinceLastAttack >= (int) requiredDelay
+                    && dist <= ATTACK_RANGE
+                    && bot.hasLineOfSight(target)) {
+                BridgeMod.LOGGER.info("Bot '{}' REACTIONARY CRIT on entity {} (fallDist={}, vel.y={})",
+                        bot.getBotName(), target.getId(),
+                        String.format("%.2f", bot.fallDistance),
+                        String.format("%.2f", vel.y));
+                executeCritAttack(dist);
+                reactionaryCritActive = false;
+                reactionaryCritTicks = 0;
+                return true;
+            }
+        }
+
+        // Still waiting in the air
+        return true;
+    }
+
+    // ==================== Distance Management ====================
+
+    /**
+     * Compute forward input based on distance management config.
+     */
+    private float computeForward(double dist, float strafeValue) {
+        if (backoffTicksRemaining > 0) {
+            backoffTicksRemaining--;
+            return -0.3f;
+        }
+        if (config.tooCloseRange > 0.0f && dist < config.tooCloseRange) {
+            return 0.0f;
+        }
+        // Normal: reduce forward when strafing close
+        if (strafeValue != 0.0f && dist < 2.0) {
+            return 0.3f;
+        }
+        return 1.0f;
+    }
+
     // ==================== Attack Mode: NORMAL ====================
 
-    private void tickNormalMelee(double dist, float strafeValue) {
+    private void tickNormalMelee(double dist, float strafeValue, float forward) {
         bot.setSprinting(dist > 1.5);
-        // Reduce forward when close + strafing → more circular movement
-        float forward = (strafeValue != 0.0f && dist < 2.0) ? 0.3f : 1.0f;
         bot.setMovementInput(forward, strafeValue, false);
         attemptNormalAttack(dist);
     }
@@ -421,7 +571,7 @@ public class CombatController {
      * Critical hit via hop: jump before cooldown ready, attack while falling.
      * Vanilla crit conditions: fallDistance > 0, !onGround, !sprinting, !inWater, !onClimbable.
      */
-    private void tickCritAttack(double dist, float strafeValue) {
+    private void tickCritAttack(double dist, float strafeValue, float forward) {
         float requiredDelay = getHeldItemAttackDelay();
         int ticksRemaining = (int) requiredDelay - ticksSinceLastAttack;
 
@@ -429,12 +579,12 @@ public class CombatController {
             case IDLE:
                 // Walk forward, NO sprint (crit requires !sprinting)
                 bot.setSprinting(false);
-                bot.setMovementInput(1.0f, strafeValue, false);
+                bot.setMovementInput(forward, strafeValue, false);
 
                 // Initiate jump when cooldown is approaching
                 if (ticksRemaining <= config.critJumpLeadTicks && dist <= ATTACK_RANGE) {
                     critPhase = CritPhase.JUMPING;
-                    bot.setMovementInput(1.0f, strafeValue, true); // jump=true
+                    bot.setMovementInput(1.0f, strafeValue, true); // jump=true, always forward
                 }
                 break;
 
@@ -504,10 +654,10 @@ public class CombatController {
      * W-tap: reset sprint before each attack so every hit gets +1 knockback bonus.
      * Vanilla Player.attack() checks isSprinting() → grants extra knockback.
      */
-    private void tickWtapAttack(double dist, float strafeValue) {
+    private void tickWtapAttack(double dist, float strafeValue, float forward) {
         // Sprint toward target
         bot.setSprinting(dist > 1.5);
-        bot.setMovementInput(1.0f, strafeValue, false);
+        bot.setMovementInput(forward, strafeValue, false);
 
         float requiredDelay = getHeldItemAttackDelay();
         if (ticksSinceLastAttack < (int) requiredDelay) {
@@ -533,6 +683,77 @@ public class CombatController {
         bot.setForceFullAttackStrength(false);
         bot.swing(InteractionHand.MAIN_HAND);
         ticksSinceLastAttack = 0;
+    }
+
+    // ==================== Attack Mode: STAP ====================
+
+    /**
+     * S-tap: backward tap after hitting to create spacing while resetting sprint.
+     * Phase: APPROACH → (attack) → BACKING → RE_ENGAGE → APPROACH
+     */
+    private void tickStapAttack(double dist, float strafeValue, float forward) {
+        float requiredDelay = getHeldItemAttackDelay();
+
+        switch (stapPhase) {
+            case APPROACH:
+                // Sprint toward target
+                bot.setSprinting(dist > 1.5);
+                bot.setMovementInput(forward, strafeValue, false);
+
+                // Check cooldown + range + LOS → attack
+                if (ticksSinceLastAttack >= (int) requiredDelay
+                        && dist <= ATTACK_RANGE
+                        && bot.hasLineOfSight(target)) {
+                    stopShielding();
+
+                    // Sprint reset (same as W-tap)
+                    bot.setSprinting(false);
+                    bot.setSprinting(true);
+
+                    BridgeMod.LOGGER.info("Bot '{}' STAP ATTACK entity {} (dist={})",
+                            bot.getBotName(), target.getId(), String.format("%.1f", dist));
+
+                    bot.setForceFullAttackStrength(true);
+                    bot.attack(target);
+                    bot.setForceFullAttackStrength(false);
+                    bot.swing(InteractionHand.MAIN_HAND);
+                    ticksSinceLastAttack = 0;
+
+                    // Enter backing phase
+                    stapPhase = StapPhase.BACKING;
+                    stapBackTicksRemaining = config.stapBackTicks;
+                    BridgeMod.LOGGER.debug("Bot '{}' STAP → BACKING ({} ticks, dist={})",
+                            bot.getBotName(), config.stapBackTicks, String.format("%.1f", dist));
+                }
+                break;
+
+            case BACKING:
+                // Walk backward, no sprint
+                bot.setSprinting(false);
+                bot.setMovementInput(-1.0f, strafeValue, false);
+                stapBackTicksRemaining--;
+
+                if (stapBackTicksRemaining <= 0) {
+                    stapPhase = StapPhase.RE_ENGAGE;
+                    BridgeMod.LOGGER.debug("Bot '{}' STAP → RE_ENGAGE (dist={})",
+                            bot.getBotName(), String.format("%.1f", dist));
+                }
+                break;
+
+            case RE_ENGAGE:
+                // Sprint forward to close gap
+                bot.setSprinting(true);
+                bot.setMovementInput(1.0f, strafeValue, false);
+
+                // Back to approach when cooldown is near or close enough
+                int ticksUntilReady = (int) requiredDelay - ticksSinceLastAttack;
+                if (ticksUntilReady <= 6 || dist < 2.0) {
+                    stapPhase = StapPhase.APPROACH;
+                    BridgeMod.LOGGER.debug("Bot '{}' STAP → APPROACH (ticksUntilReady={}, dist={})",
+                            bot.getBotName(), ticksUntilReady, String.format("%.1f", dist));
+                }
+                break;
+        }
     }
 
     // ==================== Strafe/Dodge ====================
@@ -683,7 +904,10 @@ public class CombatController {
         state = State.MELEE;
         lookAtEntity(target);
         bot.setMovementInput(1.0f, 0.0f, false);
-        bot.setSprinting(config.attackMode != CombatConfig.AttackMode.CRIT); // don't sprint for crit
+        bot.setSprinting(config.attackMode != CombatConfig.AttackMode.CRIT);
+        stapPhase = StapPhase.APPROACH;
+        stapBackTicksRemaining = 0;
+        backoffTicksRemaining = 0;
         BridgeMod.LOGGER.info("Bot '{}' entered MELEE state (dist={}, mode={}, strafe={})",
                 bot.getBotName(), String.format("%.1f", bot.distanceTo(target)),
                 config.attackMode, config.strafeMode);
@@ -703,6 +927,18 @@ public class CombatController {
         shieldBreakCooldown = 0;
         previousWeaponSlot = -1;
         ticksSinceStrafeChange = 0;
+
+        // Reset new combat enhancements
+        kbCancelActive = false;
+        kbCancelTicksRemaining = 0;
+        if (config.kbCancelMode == CombatConfig.KBCancelMode.SHIFT) {
+            bot.setShiftKeyDown(false);
+        }
+        reactionaryCritActive = false;
+        reactionaryCritTicks = 0;
+        stapPhase = StapPhase.APPROACH;
+        stapBackTicksRemaining = 0;
+        backoffTicksRemaining = 0;
 
         // Stop navigation if pursuing
         if (prevState == State.PURSUING && navController.isNavigating()) {
@@ -770,6 +1006,17 @@ public class CombatController {
 
     private void resetCritState() {
         critPhase = CritPhase.IDLE;
+    }
+
+    /** Reset all melee sub-state when leaving melee (to pursuit or stop). */
+    private void resetAllMeleeState() {
+        resetCritState();
+        stopShielding();
+        stapPhase = StapPhase.APPROACH;
+        stapBackTicksRemaining = 0;
+        backoffTicksRemaining = 0;
+        reactionaryCritActive = false;
+        reactionaryCritTicks = 0;
     }
 
     // ==================== Helpers ====================

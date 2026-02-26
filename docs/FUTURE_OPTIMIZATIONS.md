@@ -25,3 +25,25 @@ When the bot receives new tools mid-execution (e.g., via `/give`), the current p
 - 测试方法：PvP 对真人，对方举盾时观察 bot 是否自动切斧
 - 参数：`{"action": "bot_attack_nearby", "params": {"name": "bot", "shieldBreaking": true}}`
 - 确保 bot 快捷栏有斧头（`/give bot diamond_axe`）
+
+### 3. Reactionary Crit（反应式暴击）— 待测试
+`CombatController` 已实现 `reactionaryCrit` 功能：被打飞到空中时趁下落执行暴击。代码在 `tickReactionaryCrit()`。
+
+**触发条件：**
+- `hurtTime == 9 && !onGround()`（被击中且离地）
+- 等待 `fallDistance > 0 && vel.y <= -0.25`（过了跳跃顶点）
+- 满足冷却 + 距离 + 视线 → 执行暴击
+
+**待验证：**
+- 普通僵尸击退力度可能不够让 bot 离地，需要用击退附魔或高处测试
+- 参数：`{"action": "bot_attack_nearby", "params": {"name": "bot", "reactionaryCrit": true}}`
+- 日志关键字：`REACTIONARY CRIT`
+
+### 4. KB Cancel SHIFT — 待测试
+被击中时蹲下 N ticks 减少击退距离。代码在 `tickKBCancel()` SHIFT 分支。
+
+**参数：**`{"action": "bot_attack_nearby", "params": {"name": "bot", "kbCancel": "shift", "kbCancelShiftTicks": 5}}`
+**日志关键字：**`KB CANCEL SHIFT`
+
+### 5. Distance Management — ✅ 已测试
+已通过测试，bot 保持距离不贴脸。
