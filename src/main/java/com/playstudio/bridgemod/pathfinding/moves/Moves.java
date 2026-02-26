@@ -373,25 +373,22 @@ public enum Moves {
                 if (destFeet.getBlock() instanceof LadderBlock || destFeet.getBlock() instanceof VineBlock) {
                     return;
                 }
-                if (hardness0 == 0 && hardness1 == 0 && hardness2 == 0) {
-                    if (MovementHelper.isLava(ctx, destX, y - 2, destZ)) return;
+                if (MovementHelper.isLava(ctx, destX, y - 2, destZ)) return;
 
-                    // Baritone: soul sand multiplies walk-off cost
-                    double walk = ActionCosts.WALK_OFF_BLOCK_COST;
-                    if (srcDownBlock == Blocks.SOUL_SAND) {
-                        walk *= ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST / ActionCosts.WALK_ONE_BLOCK_COST;
-                    }
-                    double totalCost = walk
-                            + Math.max(ActionCosts.FALL_N_BLOCKS_COST[1], ActionCosts.CENTER_AFTER_FALL_COST)
-                            + hardness0 + hardness1 + hardness2;
-
-                    result.x = destX;
-                    result.y = y - 1;
-                    result.z = destZ;
-                    result.cost = totalCost;
-                    return;
+                // Baritone: soul sand multiplies walk-off cost
+                double walk = ActionCosts.WALK_OFF_BLOCK_COST;
+                if (srcDownBlock == Blocks.SOUL_SAND) {
+                    walk *= ActionCosts.WALK_ONE_OVER_SOUL_SAND_COST / ActionCosts.WALK_ONE_BLOCK_COST;
                 }
-                return;  // Can't mine in descent
+                double totalCost = walk
+                        + Math.max(ActionCosts.FALL_N_BLOCKS_COST[1], ActionCosts.CENTER_AFTER_FALL_COST)
+                        + hardness0 + hardness1 + hardness2;
+
+                result.x = destX;
+                result.y = y - 1;
+                result.z = destZ;
+                result.cost = totalCost;
+                return;
             }
 
             // Not a 1-block descend: check if we can fall further

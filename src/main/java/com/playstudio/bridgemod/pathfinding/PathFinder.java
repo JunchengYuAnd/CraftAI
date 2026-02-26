@@ -26,8 +26,11 @@ public class PathFinder {
     // bestSoFar coefficients (from Baritone's AbstractNodeCostSearch)
     private static final double[] COEFFICIENTS = {1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 10.0};
 
-    // Minimum distance from start for bestSoFar to count as "not failing"
-    private static final double MIN_DIST_PATH = 5.0;
+    // Minimum distance from start for bestSoFar to count as a valid partial path.
+    // Baritone uses 5.0 but that requires 5+ steps which is too strict for mining descent
+    // (each step costs ~40 ticks, hard to find 5+ steps within timeout).
+    // 3.0 → dist²>9, requires 3+ descent steps (dy=-3, dz=±1 → dist²=10).
+    private static final double MIN_DIST_PATH = 3.0;
 
     // Minimum improvement for node relaxation (Baritone setting)
     private static final double MIN_IMPROVEMENT = 0.01;
@@ -208,27 +211,23 @@ public class PathFinder {
     /**
      * Get the best partial path from bestSoFar nodes.
      * Ported from Baritone's AbstractNodeCostSearch.bestSoFar().
+     *
+     * Iterates coefficients from lowest (1.5, most balanced cost/heuristic trade-off)
+     * to highest (10.0, most heuristic-guided). Returns the FIRST coefficient's
+     * bestSoFar that is far enough from start (dist > MIN_DIST_PATH).
+     * If none are far enough, returns empty (no partial path).
      */
     private Optional<List<PathNode>> bestSoFar(int numNodes) {
-        PathNode bestNode = null;
+        PathNode startNode = getNodeAtPosition(startX, startY, startZ, PathNode.longHash(startX, startY, startZ));
+        double minDistSq = MIN_DIST_PATH * MIN_DIST_PATH;
         for (int i = 0; i < COEFFICIENTS.length; i++) {
             if (bestSoFar[i] == null) continue;
-            // Skip if it's basically the start node
-            if (getDistFromStartSq(bestSoFar[i]) <= 1) continue;
-            if (bestNode == null || bestNode == bestSoFar[0]) {
-                bestNode = bestSoFar[i];
-            }
+            if (getDistFromStartSq(bestSoFar[i]) <= minDistSq) continue;
+            List<PathNode> path = reconstructPath(startNode, bestSoFar[i]);
+            if (path.size() <= 1) continue;
+            return Optional.of(path);
         }
-        if (bestNode == null) {
-            return Optional.empty();
-        }
-        // Use the first coefficient's best if available (most balanced)
-        PathNode startNode = getNodeAtPosition(startX, startY, startZ, PathNode.longHash(startX, startY, startZ));
-        List<PathNode> path = reconstructPath(startNode, bestNode);
-        if (path.size() <= 1) {
-            return Optional.empty();
-        }
-        return Optional.of(path);
+        return Optional.empty();
     }
 
     /**

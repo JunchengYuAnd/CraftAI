@@ -5,7 +5,10 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerChunkCache;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.effect.MobEffectUtil;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.ChunkPos;
@@ -50,6 +53,12 @@ public class CalculationContext {
     // Block placement during pathfinding (Phase 3C bridge/pillar)
     public final boolean hasThrowawayBlock;
 
+    // Best-tool mining cost: hotbar snapshot + player effect multipliers.
+    // Snapshotted on server thread so A* background thread can compute
+    // mining costs using the best available tool (matching FakePlayer.selectBestTool).
+    private final ItemStack[] hotbarSnapshot;  // nullable if no player
+    private final float playerMiningMultiplier; // Haste/Fatigue combined
+
     // Water features (Baritone)
     public final boolean assumeWalkOnWater;       // Jesus mode / Frost Walker
     public final double walkOnWaterOnePenalty;     // Extra cost for walking on water surface in Jesus mode
@@ -73,6 +82,29 @@ public class CalculationContext {
         this.canSprint = canSprint;
         this.player = (player instanceof FakePlayer fp) ? fp : null;
         this.hasThrowawayBlock = (this.player != null && this.player.hasThrowawayBlock());
+        // Snapshot hotbar + player effects for thread-safe best-tool mining cost
+        if (this.player != null) {
+            this.hotbarSnapshot = new ItemStack[9];
+            for (int i = 0; i < 9; i++) {
+                this.hotbarSnapshot[i] = this.player.getInventory().getItem(i).copy();
+            }
+            float mult = 1.0f;
+            if (MobEffectUtil.hasDigSpeed(this.player)) {
+                mult *= 1.0f + (MobEffectUtil.getDigSpeedAmplification(this.player) + 1) * 0.2f;
+            }
+            if (this.player.hasEffect(MobEffects.DIG_SLOWDOWN)) {
+                mult *= switch (this.player.getEffect(MobEffects.DIG_SLOWDOWN).getAmplifier()) {
+                    case 0 -> 0.3f;
+                    case 1 -> 0.09f;
+                    case 2 -> 0.0027f;
+                    default -> 8.1E-4f;
+                };
+            }
+            this.playerMiningMultiplier = mult;
+        } else {
+            this.hotbarSnapshot = null;
+            this.playerMiningMultiplier = 1.0f;
+        }
         // Match Baritone defaults
         this.allowDiagonalDescend = true;
         this.allowDiagonalAscend = true;
@@ -190,6 +222,49 @@ public class CalculationContext {
             return prevChunk != null;
         }
         return chunkCache.containsKey(ChunkPos.asLong(cx, cz));
+    }
+
+    /**
+     * Compute the destroy progress using the best tool in the player's hotbar.
+     * Replicates vanilla's Player.getDestroySpeed() + BlockState.getDestroyProgress()
+     * but scans all hotbar slots instead of using only the currently held item.
+     * Thread-safe: reads from snapshotted hotbar, never modifies player state.
+     *
+     * @return progress per tick (0 = unbreakable), same scale as getDestroyProgress()
+     */
+    public float bestDestroyProgress(BlockState state, BlockPos pos) {
+        if (hotbarSnapshot == null) return 0;
+
+        float hardness = state.getDestroySpeed(level, pos);
+        if (hardness < 0) return 0;
+
+        float bestProgress = 0;
+        for (ItemStack stack : hotbarSnapshot) {
+            // Base tool speed (bare hand = 1.0)
+            float speed = stack.isEmpty() ? 1.0f : stack.getDestroySpeed(state);
+
+            // Efficiency enchantment (per-item)
+            if (!stack.isEmpty()) {
+                int eff = EnchantmentHelper.getItemEnchantmentLevel(Enchantments.BLOCK_EFFICIENCY, stack);
+                if (eff > 0) {
+                    speed += eff * eff + 1;
+                }
+            }
+
+            // Player-level multiplier (Haste/Mining Fatigue, snapshotted)
+            speed *= playerMiningMultiplier;
+
+            // Harvest check: determines 30x vs 100x divisor
+            boolean canHarvest = !state.requiresCorrectToolForDrops()
+                    || (!stack.isEmpty() && stack.isCorrectToolForDrops(state));
+            int divisor = canHarvest ? 30 : 100;
+
+            float progress = speed / hardness / divisor;
+            if (progress > bestProgress) {
+                bestProgress = progress;
+            }
+        }
+        return bestProgress;
     }
 
     public ServerLevel getLevel() {

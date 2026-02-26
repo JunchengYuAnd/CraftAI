@@ -36,12 +36,13 @@ public class MovementDescend extends Movement {
 
     @Override
     protected MovementStatus updateState() {
-        // Phase 3C: detect obstacle blocks at landing zone
+        // Phase 3C: detect obstacle blocks in the descent column
+        // Three blocks: dest (landing feet), dest+1 (forward body), dest+2 (forward head at src level)
         if (positionsToMine == null) {
             ArrayList<BlockPos> toMine = new ArrayList<>();
-            BlockPos destHead = dest.above();
             if (!canWalkThroughRuntime(dest)) toMine.add(dest);
-            if (!canWalkThroughRuntime(destHead)) toMine.add(destHead);
+            if (!canWalkThroughRuntime(dest.above())) toMine.add(dest.above());
+            if (!canWalkThroughRuntime(dest.above(2))) toMine.add(dest.above(2));
             positionsToMine = toMine.toArray(new BlockPos[0]);
 
             // If there's pending mining, return RUNNING so the

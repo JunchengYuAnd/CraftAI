@@ -18,6 +18,20 @@ public interface ActionCosts {
     double PLACE_ONE_BLOCK_COST = 20.0;  // estimated ticks for bridge/pillar block placement
 
     /**
+     * Estimated mining cost per vertical step for the Y-descent heuristic.
+     * Each descent step in a staircase mines ~2 new blocks (some overlap between zigzag steps).
+     * With iron pickaxe on stone: ~6.7 ticks/block × 2 ≈ 13 ticks.
+     * With stone pickaxe: ~10 ticks/block × 2 ≈ 20 ticks.
+     *
+     * We use 10 as a moderate estimate. This gives per-block descent heuristic ≈ 19.3:
+     * - Underground: sufficient for bestSoFar(coeff=10) to track descent nodes
+     *   (metric improvement = 19.3 - cost/10 > 0 for cost < 193)
+     * - Surface: overestimates by ~2x (19.3 vs actual 9.3), acceptable bounded-suboptimal
+     *   (a value of 20 caused 3x overestimate → bot mined through hills instead of walking)
+     */
+    double MINE_COST_HEURISTIC = 10.0;
+
+    /**
      * To walk off an edge you need to walk 0.5 to the edge then 0.3 to start falling off
      */
     double WALK_OFF_BLOCK_COST = WALK_ONE_BLOCK_COST * 0.8;  // 3.706

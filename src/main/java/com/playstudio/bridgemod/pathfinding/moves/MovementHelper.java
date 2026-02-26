@@ -236,11 +236,12 @@ public final class MovementHelper {
             return ActionCosts.COST_INF;
         }
 
-        // Calculate actual mining duration using vanilla API
-        // getDestroyProgress() accounts for: tool type, enchantments (Efficiency),
-        // water penalty, mining fatigue, Haste, etc.
+        // Calculate actual mining duration using the best tool in the player's hotbar.
+        // Uses CalculationContext.bestDestroyProgress() which scans all 9 hotbar slots
+        // and picks the fastest tool (matching FakePlayer.selectBestTool behavior).
+        // Thread-safe: reads from snapshotted hotbar items, not live player state.
         if (ctx.player != null) {
-            float progressPerTick = state.getDestroyProgress(ctx.player, ctx.getLevel(), pos);
+            float progressPerTick = ctx.bestDestroyProgress(state, pos);
             if (progressPerTick <= 0) {
                 return ActionCosts.COST_INF;
             }

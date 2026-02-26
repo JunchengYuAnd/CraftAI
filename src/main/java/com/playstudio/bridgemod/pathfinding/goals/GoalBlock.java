@@ -48,14 +48,35 @@ public class GoalBlock implements Goal {
     /**
      * Ported from Baritone's GoalYLevel.calculate.
      * yDiff = currentY - goalY: positive means above goal, negative means below.
+     *
+     * Enhanced: for descent, uses max(free-fall, per-block descent cost with mining estimate).
+     * Free-fall is very cheap (~52 ticks for 76 blocks) but only applies to open shafts.
+     * Per-block descent includes walk_off + fall + estimated mining cost for staircase digging.
+     *
+     * The mining estimate (MINE_COST_HEURISTIC ≈ 20 ticks) is critical: without it, the
+     * per-block heuristic (~9.3) is far below the actual mining descent cost (~40-100 ticks),
+     * so A* wastes its entire budget on horizontal exploration and bestSoFar never tracks
+     * descent nodes. With it (~29.3/block), descent nodes improve bestSoFar metrics and
+     * A* actively explores downward.
+     *
+     * Using max() is bounded-suboptimal (overestimates for open shafts where mining isn't
+     * needed) but makes underground pathfinding tractable.
      */
     static double calculateYLevel(int yDiff) {
         if (yDiff > 0) {
-            // Above goal, need to fall down
-            return ActionCosts.FALL_N_BLOCKS_COST[yDiff];
+            // Above goal, need to descend
+            int clampedDiff = Math.min(yDiff, ActionCosts.FALL_N_BLOCKS_COST.length - 1);
+            double freeFallCost = ActionCosts.FALL_N_BLOCKS_COST[clampedDiff];
+            // Per-block descent: walk off edge + land + estimated mining per step
+            double perBlockCost = yDiff * (ActionCosts.WALK_OFF_BLOCK_COST
+                    + Math.max(ActionCosts.FALL_N_BLOCKS_COST[1], ActionCosts.CENTER_AFTER_FALL_COST)
+                    + ActionCosts.MINE_COST_HEURISTIC);
+            return Math.max(freeFallCost, perBlockCost);
         }
         // Below goal, need to jump up
-        // Each block up costs jump + walk
+        // Each block up costs jump + walk (Baritone original formula, no mining estimate
+        // for ascent — surface climbing doesn't need mining bias, and underground ascent
+        // paths are short enough that the existing heuristic works fine)
         return (double) -yDiff * ActionCosts.JUMP_ONE_BLOCK_COST + ActionCosts.WALK_ONE_BLOCK_COST;
     }
 

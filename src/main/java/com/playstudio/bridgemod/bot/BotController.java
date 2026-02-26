@@ -92,11 +92,13 @@ public class BotController {
 
     /**
      * Stop current navigation.
+     * Always clears physical movement state (even if navigating is already false)
+     * to ensure the bot actually stops moving/digging/sneaking.
      */
     public void stop() {
+        clearMovement(); // Always clear, even if navigating is already false
         if (navigating) {
             navigating = false;
-            clearMovement();
             if (pendingCalculation != null) {
                 pendingCalculation.cancel(true);
                 pendingCalculation = null;
@@ -155,14 +157,18 @@ public class BotController {
                 case IN_PROGRESS:
                     // Lookahead: pre-calculate next segment when approaching end of partial path.
                     // This is the key to eliminating pauses between path segments.
+                    // CRITICAL: start from the END of the current path, not from the bot's
+                    // current position. The bot is still executing the current path; if we
+                    // search from the bot's position, the result will overlap with the
+                    // current path → the bot loops executing the same segment repeatedly.
                     if (pendingCalculation == null) {
                         List<PathNode> currentPath = currentExecutor.getPath();
                         int remaining = currentPath.size() - currentExecutor.getPathIndex();
                         PathNode lastNode = currentPath.get(currentPath.size() - 1);
                         if (remaining <= LOOKAHEAD_NODES && !goal.isInGoal(lastNode.x, lastNode.y, lastNode.z)) {
-                            BridgeMod.LOGGER.debug("Bot '{}' lookahead: {} nodes remaining, pre-calculating",
-                                    bot.getBotName(), remaining);
-                            startPathCalculation();
+                            BridgeMod.LOGGER.debug("Bot '{}' lookahead: {} nodes remaining, pre-calculating from ({},{},{})",
+                                    bot.getBotName(), remaining, lastNode.x, lastNode.y, lastNode.z);
+                            startPathCalculation(lastNode.x, lastNode.y, lastNode.z);
                         }
                     }
                     break;
@@ -286,17 +292,25 @@ public class BotController {
 
     /**
      * Start an async path calculation from the bot's current position.
+     */
+    private void startPathCalculation() {
+        int startX = BlockPos.containing(bot.getX(), bot.getY(), bot.getZ()).getX();
+        int startY = BlockPos.containing(bot.getX(), bot.getY(), bot.getZ()).getY();
+        int startZ = BlockPos.containing(bot.getX(), bot.getY(), bot.getZ()).getZ();
+        startPathCalculation(startX, startY, startZ);
+    }
+
+    /**
+     * Start an async path calculation from a specific position.
+     * Used for lookahead: search starts from the END of the current path,
+     * not from the bot's current position (which may still be mid-path).
      *
      * KEY: CalculationContext + chunk caching are created on the SERVER THREAD,
      * then the A* search runs on a background thread reading from cached chunks.
      * This avoids ServerChunkCache's thread dispatch (which was causing
      * every block read to round-trip to the main thread → 100x slowdown).
      */
-    private void startPathCalculation() {
-        int startX = BlockPos.containing(bot.getX(), bot.getY(), bot.getZ()).getX();
-        int startY = BlockPos.containing(bot.getX(), bot.getY(), bot.getZ()).getY();
-        int startZ = BlockPos.containing(bot.getX(), bot.getY(), bot.getZ()).getZ();
-
+    private void startPathCalculation(int startX, int startY, int startZ) {
         ServerLevel level = bot.serverLevel();
         boolean canSprint = bot.getFoodData().getFoodLevel() > 6;
 
@@ -337,6 +351,10 @@ public class BotController {
     private void clearMovement() {
         bot.clearMovementInput();
         bot.setSprinting(false);
+        bot.setShiftKeyDown(false);  // clear sneak from bridge placement
+        if (bot.isDigging()) {
+            bot.abortDigging();      // stop any in-progress mining
+        }
     }
 
     private void completeNavigation(boolean success, String reason) {
