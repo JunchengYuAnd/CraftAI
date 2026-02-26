@@ -256,10 +256,12 @@ public enum Moves {
                 // Bridge: no ground at dest — place block below dest
                 if (!ctx.hasThrowawayBlock) return ActionCosts.COST_INF;
 
-                // Must have source ground to place against (backplace)
-                if (!MovementHelper.canWalkOn(ctx, x, y - 1, z, srcDown)) {
-                    return ActionCosts.COST_INF;
-                }
+                // Source ground: for the first bridge, src.below() is real ground.
+                // For consecutive bridges, src.below() is a previous bridge block that
+                // doesn't exist in the world snapshot. Like PILLAR (which doesn't check
+                // canWalkOn(y-1) for consecutive pillars), we allow bridging from air
+                // with a small tiebreaker penalty to prefer bridging from real ground.
+                double placePenalty = MovementHelper.canWalkOn(ctx, x, y - 1, z, srcDown) ? 0 : 0.1;
 
                 // Dest feet and head must be passable (or mineable)
                 double h1 = MovementHelper.getMiningDurationTicks(ctx, destX, y, destZ, pb1, false);
@@ -267,8 +269,8 @@ public enum Moves {
                 double h2 = MovementHelper.getMiningDurationTicks(ctx, destX, y + 1, destZ, pb0, true);
                 if (h2 >= ActionCosts.COST_INF) return ActionCosts.COST_INF;
 
-                // Cost = sneak to edge + place block + mining
-                return ActionCosts.SNEAK_ONE_BLOCK_COST + ActionCosts.PLACE_ONE_BLOCK_COST + h1 + h2;
+                // Cost = sneak to edge + place block + mining + consecutive penalty
+                return ActionCosts.SNEAK_ONE_BLOCK_COST + ActionCosts.PLACE_ONE_BLOCK_COST + h1 + h2 + placePenalty;
             }
         }
     }

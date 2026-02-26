@@ -27,10 +27,12 @@ public class PathFinder {
     private static final double[] COEFFICIENTS = {1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 10.0};
 
     // Minimum distance from start for bestSoFar to count as a valid partial path.
-    // Baritone uses 5.0 but that requires 5+ steps which is too strict for mining descent
-    // (each step costs ~40 ticks, hard to find 5+ steps within timeout).
-    // 3.0 → dist²>9, requires 3+ descent steps (dy=-3, dz=±1 → dist²=10).
-    private static final double MIN_DIST_PATH = 3.0;
+    // Set to 0: accept any partial path that makes progress toward the goal.
+    // The bestSoFar heuristic mechanism (cost + coefficient * heuristic) already
+    // ensures quality — only nodes closer to the goal are selected.
+    // This is critical for consecutive bridging: each bridge step is only 1 block,
+    // but after execution + replan, the bot can continue (bridge or parkour).
+    private static final double MIN_DIST_PATH = 0;
 
     // Minimum improvement for node relaxation (Baritone setting)
     private static final double MIN_IMPROVEMENT = 0.01;
