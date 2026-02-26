@@ -5,8 +5,10 @@ import com.playstudio.bridgemod.BridgeMod;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.protocol.game.ClientboundRotateHeadPacket;
+import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket;
 import net.minecraft.network.protocol.game.ClientboundTeleportEntityPacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
+import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -42,6 +44,9 @@ public class FakePlayer extends ServerPlayer {
 
     // Track whether aiStep was called during super.tick()
     private boolean aiStepCalledThisTick = false;
+
+    // Equipment sync: track last broadcast held item to detect external changes (/clear, /give, etc.)
+    private ItemStack lastBroadcastMainHand = ItemStack.EMPTY;
 
     // Progressive digging state (real player mining simulation)
     private boolean isDigging = false;
@@ -189,6 +194,17 @@ public class FakePlayer extends ServerPlayer {
                 this.connection.resetPosition();
             } catch (Exception ignored) {
             }
+        }
+
+        // Detect held item changes from external sources (/clear, /give, /replaceitem, etc.)
+        // and broadcast equipment update to clients.
+        ItemStack currentMainHand = this.getMainHandItem();
+        if (!ItemStack.matches(currentMainHand, lastBroadcastMainHand)) {
+            lastBroadcastMainHand = currentMainHand.copy();
+            this.serverLevel().getChunkSource().broadcast(this,
+                    new ClientboundSetEquipmentPacket(this.getId(),
+                            java.util.List.of(com.mojang.datafixers.util.Pair.of(
+                                    EquipmentSlot.MAINHAND, currentMainHand.copy()))));
         }
     }
 
@@ -460,7 +476,7 @@ public class FakePlayer extends ServerPlayer {
             }
         }
         if (bestSlot >= 0) {
-            this.getInventory().selected = bestSlot;
+            setSelectedSlot(bestSlot);
         }
     }
 
@@ -497,7 +513,7 @@ public class FakePlayer extends ServerPlayer {
     public void equipThrowaway() {
         int slot = findThrowawaySlot();
         if (slot >= 0) {
-            this.getInventory().selected = slot;
+            setSelectedSlot(slot);
         }
     }
 
@@ -507,7 +523,23 @@ public class FakePlayer extends ServerPlayer {
      */
     public void equipToMainHand(int slot) {
         if (slot >= 0 && slot < 9) {
-            this.getInventory().selected = slot;
+            setSelectedSlot(slot);
         }
+    }
+
+    /**
+     * Change the selected hotbar slot and broadcast the held item change to all
+     * tracking clients. Direct assignment to inventory.selected doesn't trigger
+     * equipment sync packets, so clients never see the tool switch visually.
+     */
+    private void setSelectedSlot(int slot) {
+        if (this.getInventory().selected == slot) return;
+        this.getInventory().selected = slot;
+        ItemStack mainHand = this.getMainHandItem().copy();
+        lastBroadcastMainHand = mainHand;  // update cache to avoid double broadcast in tick()
+        this.serverLevel().getChunkSource().broadcast(this,
+                new ClientboundSetEquipmentPacket(this.getId(),
+                        java.util.List.of(com.mojang.datafixers.util.Pair.of(
+                                EquipmentSlot.MAINHAND, mainHand))));
     }
 }
