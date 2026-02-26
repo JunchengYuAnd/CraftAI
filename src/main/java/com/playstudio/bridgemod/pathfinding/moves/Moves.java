@@ -14,7 +14,7 @@ import net.minecraft.world.level.block.state.BlockState;
  * Ported from Baritone's Moves enum.
  *
  * Phase 3B: 16 movement types (4 traverse + 4 ascend + 4 descend + 4 diagonal).
- * Phase 3C: +1 PILLAR_UP = 17 total. TODO: PARKOUR.
+ * Phase 3C: +1 PILLAR_UP + 4 PARKOUR = 21 total.
  *
  * Omissions vs Baritone (Phase 3B): no block placing (bridge/pillar), no mining,
  * no parkour, no frost walker. These are all Phase 3C.
@@ -133,6 +133,32 @@ public enum Moves {
         @Override
         public double cost(CalculationContext ctx, int x, int y, int z) {
             return MovementPillar.cost(ctx, x, y, z);
+        }
+    },
+
+    // --- Parkour (sprint-jump over 1-3 block gap, flat) - dynamicXZ ---
+    PARKOUR_NORTH(0, 0, -4, true, false) {
+        @Override
+        public void apply(CalculationContext ctx, int x, int y, int z, MoveResult result) {
+            MovementParkour.cost(ctx, x, y, z, 0, -1, result);
+        }
+    },
+    PARKOUR_SOUTH(0, 0, 4, true, false) {
+        @Override
+        public void apply(CalculationContext ctx, int x, int y, int z, MoveResult result) {
+            MovementParkour.cost(ctx, x, y, z, 0, 1, result);
+        }
+    },
+    PARKOUR_EAST(4, 0, 0, true, false) {
+        @Override
+        public void apply(CalculationContext ctx, int x, int y, int z, MoveResult result) {
+            MovementParkour.cost(ctx, x, y, z, 1, 0, result);
+        }
+    },
+    PARKOUR_WEST(-4, 0, 0, true, false) {
+        @Override
+        public void apply(CalculationContext ctx, int x, int y, int z, MoveResult result) {
+            MovementParkour.cost(ctx, x, y, z, -1, 0, result);
         }
     };
 
@@ -698,6 +724,90 @@ public enum Moves {
             }
 
             return ActionCosts.JUMP_ONE_BLOCK_COST + placeCost + ctx.jumpPenalty + hardness;
+        }
+    }
+
+    /**
+     * Parkour: sprint-jump over a 1-3 block gap (flat, same Y).
+     * Ported from Baritone's MovementParkour.cost() (simplified: flat only, no descending parkour).
+     *
+     * Gap width vs jump distance:
+     * - 1-block gap → 2-block jump (land 2 blocks from src)
+     * - 2-block gap → 3-block jump (land 3 blocks from src)
+     * - 3-block gap → 4-block jump (land 4 blocks from src, near sprint-jump max)
+     *
+     * Checks:
+     * - Must be able to sprint (not in water, not on soul sand/ladder/vine)
+     * - y+2 must be clear at all positions (ceiling / head-bonk check)
+     * - Gap blocks must NOT have walkable ground (otherwise TRAVERSE handles it)
+     * - Gap blocks must be passable and not dangerous (lava, fire, etc.)
+     * - Landing block must have ground and body clearance
+     */
+    static final class MovementParkour {
+        static void cost(CalculationContext ctx, int x, int y, int z,
+                         int xDir, int zDir, MoveResult result) {
+            // Must be able to sprint
+            if (!ctx.canSprint) return;
+
+            // Source ground checks
+            BlockState srcDown = ctx.get(x, y - 1, z);
+            if (!MovementHelper.canWalkOn(ctx, x, y - 1, z, srcDown)) return;
+            Block srcDownBlock = srcDown.getBlock();
+            if (srcDownBlock instanceof LadderBlock || srcDownBlock instanceof VineBlock) return;
+            if (srcDownBlock == Blocks.SOUL_SAND) return;
+
+            // Can't sprint-jump from water
+            if (MovementHelper.isWater(ctx.get(x, y, z))) return;
+
+            // Ceiling check at source: y+2 must be clear (head-bonk during jump)
+            if (!MovementHelper.canWalkThrough(ctx, x, y + 2, z)) return;
+
+            // Gap block 1: must NOT have walkable ground (otherwise TRAVERSE is better)
+            int g1x = x + xDir, g1z = z + zDir;
+            if (MovementHelper.canWalkOn(ctx, g1x, y - 1, g1z)) return;
+
+            // Gap block 1: body must be passable, not dangerous, ceiling clear
+            if (!canPassThrough(ctx, g1x, y, g1z)) return;
+
+            // Try landing at increasing distances (2, 3, 4 blocks from src)
+            for (int dist = 2; dist <= 4; dist++) {
+                int dx = x + xDir * dist, dz = z + zDir * dist;
+                if (canLand(ctx, dx, y, dz)) {
+                    result.x = dx;
+                    result.y = y;
+                    result.z = dz;
+                    result.cost = ActionCosts.SPRINT_ONE_BLOCK_COST * dist + ctx.jumpPenalty;
+                    return;
+                }
+                // Not a landing spot — check if passable for longer jump
+                if (!canPassThrough(ctx, dx, y, dz)) return;
+            }
+        }
+
+        /**
+         * Check if a gap position is passable for mid-air transit.
+         * Feet (y), head (y+1), and jump ceiling (y+2) must all be clear.
+         * Feet and head must not be dangerous (lava, fire, cactus, etc.).
+         */
+        private static boolean canPassThrough(CalculationContext ctx, int gx, int y, int gz) {
+            BlockState feet = ctx.get(gx, y, gz);
+            BlockState head = ctx.get(gx, y + 1, gz);
+            if (!MovementHelper.canWalkThrough(ctx, gx, y, gz, feet)) return false;
+            if (!MovementHelper.canWalkThrough(ctx, gx, y + 1, gz, head)) return false;
+            if (!MovementHelper.canWalkThrough(ctx, gx, y + 2, gz)) return false;
+            if (MovementHelper.avoidWalkingInto(feet)) return false;
+            if (MovementHelper.avoidWalkingInto(head)) return false;
+            return true;
+        }
+
+        /**
+         * Check if a position is a valid landing spot.
+         * Must have walkable ground (y-1) and clear body space (y, y+1).
+         */
+        private static boolean canLand(CalculationContext ctx, int dx, int y, int dz) {
+            return MovementHelper.canWalkOn(ctx, dx, y - 1, dz)
+                    && MovementHelper.canWalkThrough(ctx, dx, y, dz)
+                    && MovementHelper.canWalkThrough(ctx, dx, y + 1, dz);
         }
     }
 }

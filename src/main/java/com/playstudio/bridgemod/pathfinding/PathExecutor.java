@@ -246,6 +246,12 @@ public class PathExecutor {
             case PILLAR_UP:
                 return new MovementPillar(bot, src, dest);
 
+            case PARKOUR_NORTH:
+            case PARKOUR_SOUTH:
+            case PARKOUR_EAST:
+            case PARKOUR_WEST:
+                return new MovementParkour(bot, src, dest);
+
             default:
                 return inferMovement(bot, src, dest);
         }
@@ -265,6 +271,9 @@ public class PathExecutor {
             return new MovementAscend(bot, src, dest);
         } else if (dy < 0) {
             return new MovementDescend(bot, src, dest);
+        } else if (dy == 0 && (dx + dz >= 2) && (dx == 0 || dz == 0)) {
+            // Cardinal 2-3 block gap: parkour sprint-jump
+            return new MovementParkour(bot, src, dest);
         } else if (dx + dz == 2) {
             return new MovementDiagonal(bot, src, dest);
         } else {
