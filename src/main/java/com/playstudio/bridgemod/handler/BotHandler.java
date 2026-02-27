@@ -903,6 +903,22 @@ public class BotHandler {
         if (params.has("threatEvasionWeight")) {
             config.threatEvasionWeight = params.get("threatEvasionWeight").getAsFloat();
         }
+        // Potential field movement (Phase 1)
+        if (params.has("usePotentialFields")) {
+            config.usePotentialFields = params.get("usePotentialFields").getAsBoolean();
+        }
+        if (params.has("optimalMeleeDistance")) {
+            config.optimalMeleeDistance = params.get("optimalMeleeDistance").getAsDouble();
+        }
+        if (params.has("tangentStrength")) {
+            config.tangentStrength = params.get("tangentStrength").getAsDouble();
+        }
+        if (params.has("threatRepulsionK")) {
+            config.threatRepulsionK = params.get("threatRepulsionK").getAsDouble();
+        }
+        if (params.has("threatRepulsionRange")) {
+            config.threatRepulsionRange = params.get("threatRepulsionRange").getAsDouble();
+        }
         return config;
     }
 

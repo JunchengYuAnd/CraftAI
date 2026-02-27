@@ -62,4 +62,11 @@ public class CombatConfig {
     public boolean threatAwareness = false;     // scan nearby threats while fighting primary target
     public double threatScanRadius = 8.0;       // radius to scan for secondary threats
     public float threatEvasionWeight = 0.5f;    // 0.0=ignore threats, 1.0=fully threat-driven dodge
+
+    // Potential field movement (Phase 1)
+    public boolean usePotentialFields = false;    // replace discrete strafe/forward with potential field
+    public double optimalMeleeDistance = 2.8;     // ring field center distance from target
+    public double tangentStrength = 0.4;          // orbital strafing force strength
+    public double threatRepulsionK = 3.0;         // threat push strength coefficient
+    public double threatRepulsionRange = 6.0;     // ignore threats beyond this range
 }
