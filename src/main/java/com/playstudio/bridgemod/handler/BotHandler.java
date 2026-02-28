@@ -850,20 +850,8 @@ public class BotHandler {
                 default: config.attackMode = CombatConfig.AttackMode.NORMAL; break;
             }
         }
-        if (params.has("strafe")) {
-            String strafe = params.get("strafe").getAsString().toLowerCase();
-            switch (strafe) {
-                case "circle": config.strafeMode = CombatConfig.StrafeMode.CIRCLE; break;
-                case "random": config.strafeMode = CombatConfig.StrafeMode.RANDOM; break;
-                case "intelligent": config.strafeMode = CombatConfig.StrafeMode.INTELLIGENT; break;
-                default: config.strafeMode = CombatConfig.StrafeMode.NONE; break;
-            }
-        }
-        if (params.has("strafeIntensity")) {
-            config.strafeIntensity = params.get("strafeIntensity").getAsFloat();
-        }
-        if (params.has("strafeChangeInterval")) {
-            config.strafeChangeIntervalTicks = params.get("strafeChangeInterval").getAsInt();
+        if (params.has("orbitFlipInterval")) {
+            config.orbitFlipIntervalTicks = params.get("orbitFlipInterval").getAsInt();
         }
         if (params.has("shieldBreaking")) {
             config.shieldBreaking = params.get("shieldBreaking").getAsBoolean();
@@ -888,24 +876,11 @@ public class BotHandler {
         if (params.has("stapBackTicks")) {
             config.stapBackTicks = params.get("stapBackTicks").getAsInt();
         }
-        if (params.has("tooCloseRange")) {
-            config.tooCloseRange = params.get("tooCloseRange").getAsFloat();
-        }
-        if (params.has("backoffOnHitTicks")) {
-            config.backoffOnHitTicks = params.get("backoffOnHitTicks").getAsInt();
-        }
         if (params.has("threatAwareness")) {
             config.threatAwareness = params.get("threatAwareness").getAsBoolean();
         }
         if (params.has("threatScanRadius")) {
             config.threatScanRadius = params.get("threatScanRadius").getAsDouble();
-        }
-        if (params.has("threatEvasionWeight")) {
-            config.threatEvasionWeight = params.get("threatEvasionWeight").getAsFloat();
-        }
-        // Potential field movement (Phase 1)
-        if (params.has("usePotentialFields")) {
-            config.usePotentialFields = params.get("usePotentialFields").getAsBoolean();
         }
         if (params.has("optimalMeleeDistance")) {
             config.optimalMeleeDistance = params.get("optimalMeleeDistance").getAsDouble();

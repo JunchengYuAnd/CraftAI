@@ -4,6 +4,8 @@ package com.playstudio.bridgemod.bot;
  * Configuration for advanced PvP combat techniques.
  * Passed to CombatController.startAttack() from WebSocket params.
  * All fields have safe defaults (= current behavior).
+ *
+ * Movement uses Artificial Potential Fields exclusively.
  */
 public class CombatConfig {
 
@@ -12,13 +14,6 @@ public class CombatConfig {
         CRIT,       // jump + fall + attack (1.5x damage, no sprint knockback)
         WTAP,       // sprint reset between attacks (extra knockback each hit)
         STAP        // backward tap after hit (sprint reset + spacing)
-    }
-
-    public enum StrafeMode {
-        NONE,           // walk straight at target (default)
-        CIRCLE,         // consistent strafe direction, periodic switch
-        RANDOM,         // random strafe direction switches
-        INTELLIGENT     // react to incoming hits + periodic random
     }
 
     public enum KBCancelMode {
@@ -30,16 +25,9 @@ public class CombatConfig {
     // Attack technique
     public AttackMode attackMode = AttackMode.NORMAL;
 
-    // Strafe mode during melee (compatible with all attack modes)
-    public StrafeMode strafeMode = StrafeMode.NONE;
-
     // Shield handling
     public boolean shieldBreaking = false;   // auto-switch to axe vs blocking targets
     public boolean autoShield = false;       // raise own shield between attacks
-
-    // Strafe tuning
-    public int strafeChangeIntervalTicks = 40;  // ticks between strafe direction changes
-    public float strafeIntensity = 0.8f;        // 0.0-1.0, mapped to strafe input
 
     // Crit tuning
     public int critJumpLeadTicks = 6;  // ticks before cooldown ready to initiate jump
@@ -54,19 +42,14 @@ public class CombatConfig {
     // S-tap tuning
     public int stapBackTicks = 4;  // ticks to walk backward after hitting
 
-    // Distance management
-    public float tooCloseRange = 0.0f;    // 0 = disabled; stop forward when closer than this
-    public int backoffOnHitTicks = 0;     // 0 = disabled; stop approaching for N ticks after hit
-
     // Multi-target threat awareness
     public boolean threatAwareness = false;     // scan nearby threats while fighting primary target
     public double threatScanRadius = 8.0;       // radius to scan for secondary threats
-    public float threatEvasionWeight = 0.5f;    // 0.0=ignore threats, 1.0=fully threat-driven dodge
 
-    // Potential field movement (Phase 1)
-    public boolean usePotentialFields = false;    // replace discrete strafe/forward with potential field
-    public double optimalMeleeDistance = 2.8;     // ring field center distance from target
+    // Potential field movement
+    public double optimalMeleeDistance = 3.0;     // ring field center distance from target (= ATTACK_RANGE)
     public double tangentStrength = 0.4;          // orbital strafing force strength
     public double threatRepulsionK = 3.0;         // threat push strength coefficient
     public double threatRepulsionRange = 6.0;     // ignore threats beyond this range
+    public int orbitFlipIntervalTicks = 40;       // ticks between orbit direction flips
 }

@@ -9,6 +9,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.tags.FluidTags;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -42,6 +43,49 @@ public class CombatPotentialField {
     };
 
     /**
+     * Force breakdown for debug logging — shows contribution of each force component.
+     */
+    public static class ForceBreakdown {
+        public double dist, optimalDist, radialError, radialForce;
+        public int blockingThreats;
+        public double blockingDamp;
+        public float tangentDir;
+        public double tangentForce, tangentDampening;
+        public double leftThreatScore, rightThreatScore;
+        public final List<String> threatDetails = new ArrayList<>();
+        public double threatFx, threatFz;
+        public double wallFx, wallFz;
+        public double cliffFx, cliffFz;
+        public double hazardFx, hazardFz;
+        public double totalFx, totalFz;
+
+        @Override
+        public String toString() {
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("dist=%.2f optDist=%.2f radErr=%.2f radF=%.3f",
+                    dist, optimalDist, radialError, radialForce));
+            if (blockingThreats > 0)
+                sb.append(String.format(" blockDamp=%.1f(%d)", blockingDamp, blockingThreats));
+            sb.append(String.format(" | tangent: dir=%s str=%.3f damp=%.1f Lscore=%.2f Rscore=%.2f",
+                    tangentDir > 0 ? "L" : "R", tangentForce, tangentDampening,
+                    leftThreatScore, rightThreatScore));
+            if (!threatDetails.isEmpty()) {
+                sb.append(" | threats: ");
+                sb.append(String.join("; ", threatDetails));
+                sb.append(String.format(" sum=(%.2f,%.2f)", threatFx, threatFz));
+            }
+            if (wallFx != 0 || wallFz != 0)
+                sb.append(String.format(" | wall=(%.2f,%.2f)", wallFx, wallFz));
+            if (cliffFx != 0 || cliffFz != 0)
+                sb.append(String.format(" | cliff=(%.2f,%.2f)", cliffFx, cliffFz));
+            if (hazardFx != 0 || hazardFz != 0)
+                sb.append(String.format(" | hazard=(%.2f,%.2f)", hazardFx, hazardFz));
+            sb.append(String.format(" | TOTAL=(%.2f,%.2f)", totalFx, totalFz));
+            return sb.toString();
+        }
+    }
+
+    /**
      * Compute the total 2D force vector in world XZ space.
      *
      * @param bot         the bot entity
@@ -64,6 +108,24 @@ public class CombatPotentialField {
             double threatRange,
             float strafeDir
     ) {
+        return computeForceVector(bot, target, threats, optimalDist, tangentStr,
+                threatK, threatRange, strafeDir, null);
+    }
+
+    /**
+     * Compute the total 2D force vector, optionally populating a debug breakdown.
+     */
+    public static double[] computeForceVector(
+            FakePlayer bot,
+            LivingEntity target,
+            List<? extends ThreatSource> threats,
+            double optimalDist,
+            double tangentStr,
+            double threatK,
+            double threatRange,
+            float strafeDir,
+            ForceBreakdown dbg
+    ) {
         double fx = 0, fz = 0;
         double bx = bot.getX(), bz = bot.getZ();
 
@@ -80,6 +142,7 @@ public class CombatPotentialField {
         // === 2. Threat repulsion (inverse-square) ===
         // Count threats that block the path to target (between bot and target, in same direction)
         int blockingThreatCount = 0;
+        double threatSumFx = 0, threatSumFz = 0;
         if (threats != null) {
             for (ThreatSource threat : threats) {
                 double tdx = threat.getX() - bx;
@@ -105,9 +168,36 @@ public class CombatPotentialField {
                 repulsion = Math.min(repulsion, 4.0);
                 double tnx = -tdx / tDist; // away from threat
                 double tnz = -tdz / tDist;
-                fx += tnx * repulsion;
-                fz += tnz * repulsion;
+                double tfx = tnx * repulsion;
+                double tfz = tnz * repulsion;
+
+                // Filter out "toward target" component of threat repulsion.
+                // When a threat is behind the bot, its repulsion pushes bot toward target,
+                // causing oscillation. Remove that component, keep only perpendicular.
+                if (dist > 0.01) {
+                    double dotToward = tfx * targetNx + tfz * targetNz;
+                    if (dotToward > 0) {
+                        // This repulsion has a "push toward target" component — remove it
+                        tfx -= dotToward * targetNx;
+                        tfz -= dotToward * targetNz;
+                    }
+                }
+
+                fx += tfx;
+                fz += tfz;
+                threatSumFx += tfx;
+                threatSumFz += tfz;
+
+                if (dbg != null) {
+                    dbg.threatDetails.add(String.format("d=%.1f rep=%.2f%s f=(%.2f,%.2f)",
+                            tDist, repulsion, blocking ? "[BLOCK]" : "", tfx, tfz));
+                }
             }
+        }
+        if (dbg != null) {
+            dbg.threatFx = threatSumFx;
+            dbg.threatFz = threatSumFz;
+            dbg.blockingThreats = blockingThreatCount;
         }
 
         // === 1 (cont). Apply target attraction with blocking penalty ===
@@ -116,45 +206,105 @@ public class CombatPotentialField {
             double radialStrength;
 
             if (radialError >= 0) {
-                // Too far: gentle pull in (spring constant 0.8, cap 2.0)
-                radialStrength = clamp(radialError * 0.8, 0.0, 2.0);
+                // Too far: gentle pull in (spring constant 0.4, cap 1.0)
+                // Deliberately weak so bot decelerates before reaching optimal distance
+                radialStrength = clamp(radialError * 0.4, 0.0, 1.0);
             } else {
-                // Too close: STRONG push out (spring constant 2.0, cap -3.0)
-                // Asymmetric: push-out is 2.5x stronger than pull-in
-                radialStrength = clamp(radialError * 2.0, -3.0, 0.0);
+                // Too close: STRONG push out (spring constant 3.0, cap -5.0)
+                // Asymmetric: push-out is 7.5x stronger than pull-in
+                // High cap ensures bot retreats fast even at large optimal distances (4.0+)
+                radialStrength = clamp(radialError * 3.0, -5.0, 0.0);
             }
 
             // If threats are blocking the path, weaken forward pull to avoid charging through
             // 1 blocker → 40% pull, 2+ blockers → 20% pull (push-out force unaffected)
+            double blockingDamp = 1.0;
             if (blockingThreatCount > 0 && radialStrength > 0) {
-                double dampFactor = blockingThreatCount >= 2 ? 0.2 : 0.4;
-                radialStrength *= dampFactor;
+                blockingDamp = blockingThreatCount >= 2 ? 0.2 : 0.4;
+                radialStrength *= blockingDamp;
             }
 
             fx += targetNx * radialStrength;
             fz += targetNz * radialStrength;
 
+            if (dbg != null) {
+                dbg.dist = dist;
+                dbg.optimalDist = optimalDist;
+                dbg.radialError = radialError;
+                dbg.radialForce = radialStrength;
+                dbg.blockingDamp = blockingDamp;
+            }
+
             // Tangential: perpendicular to radial direction for orbital motion
-            // When too close: SUPPRESS orbit to back away straight, not sideways into side threats
-            double effectiveTangent = tangentStr;
+            // Threat-aware: choose orbit direction that moves AWAY from threats
+            float effectiveStrafeDir = strafeDir;
+            double tangentDampening = 1.0;
+            double leftScore = 0;   // threat weight on left orbit side
+            double rightScore = 0;  // threat weight on right orbit side
+
+            if (threats != null && !threats.isEmpty()) {
+                // Project each threat onto the tangent axis to find which side has more threats
+                // Left tangent direction = (-targetNz, targetNx)
+
+                for (ThreatSource threat : threats) {
+                    double tdx = threat.getX() - bx;
+                    double tdz = threat.getZ() - bz;
+                    double tDist = threat.getDistance();
+                    if (tDist < 0.5) tDist = 0.5;
+                    if (tDist > threatRange) continue;
+
+                    // Project threat direction onto left tangent vector
+                    double proj = tdx * (-targetNz) + tdz * targetNx;
+                    double weight = 1.0 / (tDist * tDist);
+
+                    if (proj > 0) {
+                        leftScore += proj * weight;
+                    } else {
+                        rightScore += (-proj) * weight;
+                    }
+                }
+
+                // Choose orbit direction away from threat concentration
+                if (leftScore > rightScore * 1.5) {
+                    // Threats mostly on left → orbit right
+                    effectiveStrafeDir = -1.0f;
+                } else if (rightScore > leftScore * 1.5) {
+                    // Threats mostly on right → orbit left
+                    effectiveStrafeDir = 1.0f;
+                } else {
+                    // Threats on both sides → suppress orbit, back away straight
+                    tangentDampening = 0.2;
+                }
+            }
+
+            // When too close: further suppress orbit to back away straight
+            double effectiveTangent = tangentStr * tangentDampening;
             if (radialError < -0.3) {
                 if (threats != null && !threats.isEmpty()) {
-                    // Surrounded: minimal orbit, let threat repulsion handle lateral direction
                     effectiveTangent *= 0.2;
                 } else {
-                    // 1v1 too close: mild orbit still helps dodge single target
                     effectiveTangent *= 0.7;
                 }
             }
-            double tx = -targetNz * strafeDir;
-            double tz =  targetNx * strafeDir;
+
+            double tx = -targetNz * effectiveStrafeDir;
+            double tz =  targetNx * effectiveStrafeDir;
             fx += tx * effectiveTangent;
             fz += tz * effectiveTangent;
+
+            if (dbg != null) {
+                dbg.tangentDir = effectiveStrafeDir;
+                dbg.tangentForce = effectiveTangent;
+                dbg.tangentDampening = tangentDampening;
+                dbg.leftThreatScore = leftScore;
+                dbg.rightThreatScore = rightScore;
+            }
         }
 
         // === 3. Wall repulsion ===
         Level level = bot.level();
         int by = (int) Math.floor(bot.getY());
+        double wallSumFx = 0, wallSumFz = 0;
         for (double[] off : CARDINAL_OFFSETS) {
             double checkX = bx + off[0] * 1.5;
             double checkZ = bz + off[1] * 1.5;
@@ -172,11 +322,15 @@ public class CombatPotentialField {
                     wallForce = Math.min(wallForce, 1.5);
                     fx -= off[0] * wallForce;
                     fz -= off[1] * wallForce;
+                    wallSumFx -= off[0] * wallForce;
+                    wallSumFz -= off[1] * wallForce;
                 }
             }
         }
+        if (dbg != null) { dbg.wallFx = wallSumFx; dbg.wallFz = wallSumFz; }
 
         // === 4. Cliff repulsion ===
+        double cliffSumFx = 0, cliffSumFz = 0;
         for (double[] off : CARDINAL_OFFSETS) {
             double checkX = bx + off[0] * 1.5;
             double checkZ = bz + off[1] * 1.5;
@@ -198,11 +352,15 @@ public class CombatPotentialField {
                     cliffForce = Math.min(cliffForce, 2.5);
                     fx -= off[0] * cliffForce;
                     fz -= off[1] * cliffForce;
+                    cliffSumFx -= off[0] * cliffForce;
+                    cliffSumFz -= off[1] * cliffForce;
                 }
             }
         }
+        if (dbg != null) { dbg.cliffFx = cliffSumFx; dbg.cliffFz = cliffSumFz; }
 
         // === 5. Hazard repulsion (lava, fire, water) ===
+        double hazardSumFx = 0, hazardSumFz = 0;
         for (double[] off : OCTAL_OFFSETS) {
             double checkX = bx + off[0] * 2.0;
             double checkZ = bz + off[1] * 2.0;
@@ -223,6 +381,8 @@ public class CombatPotentialField {
                 double norm = Math.sqrt(off[0] * off[0] + off[1] * off[1]);
                 fx -= (off[0] / norm) * hazardForce;
                 fz -= (off[1] / norm) * hazardForce;
+                hazardSumFx -= (off[0] / norm) * hazardForce;
+                hazardSumFz -= (off[1] / norm) * hazardForce;
             } else if (fluid.is(FluidTags.WATER) || fluidBelow.is(FluidTags.WATER)) {
                 // Moderate water repulsion (slow zone)
                 double hazardDist = Math.sqrt(off[0] * off[0] + off[1] * off[1]) * 2.0;
@@ -231,7 +391,15 @@ public class CombatPotentialField {
                 double norm = Math.sqrt(off[0] * off[0] + off[1] * off[1]);
                 fx -= (off[0] / norm) * hazardForce;
                 fz -= (off[1] / norm) * hazardForce;
+                hazardSumFx -= (off[0] / norm) * hazardForce;
+                hazardSumFz -= (off[1] / norm) * hazardForce;
             }
+        }
+        if (dbg != null) {
+            dbg.hazardFx = hazardSumFx;
+            dbg.hazardFz = hazardSumFz;
+            dbg.totalFx = fx;
+            dbg.totalFz = fz;
         }
 
         return new double[]{fx, fz};
