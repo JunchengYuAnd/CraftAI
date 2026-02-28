@@ -8,6 +8,7 @@ import com.playstudio.bridgemod.bot.BotManager;
 import com.playstudio.bridgemod.bot.CombatConfig;
 import com.playstudio.bridgemod.bot.CombatController;
 import com.playstudio.bridgemod.bot.FakePlayer;
+import com.playstudio.bridgemod.bot.combat.MobProfileStorage;
 import com.playstudio.bridgemod.websocket.BridgeWebSocketServer;
 import com.playstudio.bridgemod.websocket.MessageHandler;
 import com.playstudio.bridgemod.websocket.Protocol;
@@ -61,6 +62,8 @@ public class BotHandler {
         messageHandler.registerHandler("bot_attack", this::handleAttack);
         messageHandler.registerHandler("bot_attack_nearby", this::handleAttackNearby);
         messageHandler.registerHandler("bot_attack_cancel", this::handleAttackCancel);
+        messageHandler.registerHandler("bot_mob_profiles", this::handleMobProfiles);
+        messageHandler.registerHandler("bot_reset_profiles", this::handleResetProfiles);
     }
 
     /**
@@ -894,7 +897,55 @@ public class BotHandler {
         if (params.has("threatRepulsionRange")) {
             config.threatRepulsionRange = params.get("threatRepulsionRange").getAsDouble();
         }
+        if (params.has("mobLearning")) {
+            config.mobLearning = params.get("mobLearning").getAsBoolean();
+        }
         return config;
+    }
+
+    /**
+     * bot_mob_profiles: Query learned mob profiles for a bot.
+     * params: {name}
+     */
+    private void handleMobProfiles(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name")) {
+            server.sendResponse(conn, id, false, null, "Missing 'name' parameter");
+            return;
+        }
+        String name = params.get("name").getAsString();
+        CombatController combat = combatControllers.get(name);
+        if (combat == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+        JsonObject data = MobProfileStorage.toJsonResponse(combat.getProfileManager());
+        server.sendResponse(conn, id, true, data, null);
+    }
+
+    /**
+     * bot_reset_profiles: Reset learned mob profiles for a bot.
+     * params: {name, entityType?} — if entityType omitted, reset all
+     */
+    private void handleResetProfiles(WebSocket conn, String id, JsonObject params) {
+        if (!params.has("name")) {
+            server.sendResponse(conn, id, false, null, "Missing 'name' parameter");
+            return;
+        }
+        String name = params.get("name").getAsString();
+        CombatController combat = combatControllers.get(name);
+        if (combat == null) {
+            server.sendResponse(conn, id, false, null, "No bot named '" + name + "'");
+            return;
+        }
+        if (params.has("entityType")) {
+            String entityType = params.get("entityType").getAsString();
+            combat.getProfileManager().resetProfile(entityType);
+        } else {
+            combat.getProfileManager().resetAll();
+        }
+        JsonObject data = new JsonObject();
+        data.addProperty("reset", true);
+        server.sendResponse(conn, id, true, data, null);
     }
 
     // --- Helper: parse direction string ---

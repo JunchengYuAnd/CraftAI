@@ -13,13 +13,17 @@ import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.item.AxeItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.ShieldItem;
-import net.minecraft.world.level.Level;
-import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.core.BlockPos;
 import net.minecraft.world.phys.Vec3;
 
 import com.playstudio.bridgemod.bot.combat.CombatPotentialField;
+import com.playstudio.bridgemod.bot.combat.MobProfile;
+import com.playstudio.bridgemod.bot.combat.MobProfileManager;
+import com.playstudio.bridgemod.bot.combat.MobProfileStorage;
+import com.playstudio.bridgemod.bot.combat.ObservationCollector;
+import com.playstudio.bridgemod.bot.combat.ParameterAdapter;
 
+
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -112,14 +116,6 @@ public class CombatController {
     private static final int THREAT_MEMORY_TICKS = 60; // forget damage after 3 seconds
     private static final int MAX_THREATS = 5;
 
-    // Disengage state (flee when swarmed, re-engage when safe)
-    private int disengageTicksRemaining = 0;
-    private double escapeAngleX = 0, escapeAngleZ = 0; // committed escape direction (set once per disengage)
-    private static final int DISENGAGE_DURATION = 40;        // 2s of fleeing
-    private static final int DISENGAGE_CLOSE_THRESHOLD = 2;  // need 2+ close threats to trigger
-    private static final double DISENGAGE_CLOSE_RANGE = 3.5; // "close" = within 3.5 blocks
-    private static final double DISENGAGE_SAFE_RANGE = 5.0;  // stop fleeing when nearest threat > 5
-
     // Pursuit dodge state (strafe when hit during pathfinding)
     private int pursuitDodgeTicks = 0;
     private float pursuitDodgeStrafe = 0.0f;
@@ -130,7 +126,7 @@ public class CombatController {
     private BiConsumer<Boolean, String> autoAttackCallback = null;
     private int killCount = 0;
 
-    // Constants
+    // Constants (defaults when mob learning is off)
     private static final double ATTACK_RANGE = 3.0;       // survival melee reach
     private static final double MELEE_CLOSE = 2.5;        // switch to melee state
     private static final double MELEE_EXIT = 4.0;         // switch back to pursuing
@@ -140,9 +136,29 @@ public class CombatController {
     private static final int PURSUIT_RANGE = 2;            // GoalNear range for pathfinding
     private static final double PURSUIT_THREAT_CLOSE = 3.0;  // threats this close → back away
 
+    // Mob learning: observe mob behavior and adapt combat parameters
+    private final MobProfileManager profileManager = new MobProfileManager();
+    private ObservationCollector observer;
+    private MobProfile targetProfile;
+
+    // Effective (adapted) parameters — updated each tick from MobProfile or defaults
+    private double effectiveMeleeClose = MELEE_CLOSE;
+    private double effectiveMeleeExit = MELEE_EXIT;
+    private int effectivePursuitDodgeTicks = 5;
+    private int effectiveThreatMemoryTicks = THREAT_MEMORY_TICKS;
+
     public CombatController(FakePlayer bot, BotController navController) {
         this.bot = bot;
         this.navController = navController;
+
+        // Load persisted mob profiles
+        Path gameDir = bot.getServer().getServerDirectory().toPath();
+        MobProfileStorage.loadAll(profileManager, gameDir);
+    }
+
+    /** Get the profile manager (for persistence / WebSocket queries). */
+    public MobProfileManager getProfileManager() {
+        return profileManager;
     }
 
     /**
@@ -179,9 +195,17 @@ public class CombatController {
             bot.equipShieldToOffhand();
         }
 
-        BridgeMod.LOGGER.info("Bot '{}' starting combat with entity {} ({}) [mode={}]",
+        // Initialize mob learning observer
+        if (this.config.mobLearning) {
+            this.observer = new ObservationCollector(bot, profileManager, this.config.threatScanRadius);
+            MobProfile profile = profileManager.getProfile(target);
+            profile.recordEncounter();
+            BridgeMod.LOGGER.info("Bot '{}' mob learning ON — target profile: {}", bot.getBotName(), profile);
+        }
+
+        BridgeMod.LOGGER.info("Bot '{}' starting combat with entity {} ({}) [mode={}, mobLearning={}]",
                 bot.getBotName(), entityId, target.getType().toShortString(),
-                this.config.attackMode);
+                this.config.attackMode, this.config.mobLearning);
 
         // Check if already in melee range
         double dist = bot.distanceTo(target);
@@ -214,8 +238,14 @@ public class CombatController {
         this.config = config != null ? config : new CombatConfig();
         this.killCount = 0;
 
-        BridgeMod.LOGGER.info("Bot '{}' auto-attack mode ON (radius={}, mode={})",
-                bot.getBotName(), (int) radius, this.config.attackMode);
+        // Initialize mob learning observer
+        if (this.config.mobLearning) {
+            this.observer = new ObservationCollector(bot, profileManager, this.config.threatScanRadius);
+            BridgeMod.LOGGER.info("Bot '{}' auto-attack mob learning ON", bot.getBotName());
+        }
+
+        BridgeMod.LOGGER.info("Bot '{}' auto-attack mode ON (radius={}, mode={}, mobLearning={})",
+                bot.getBotName(), (int) radius, this.config.attackMode, this.config.mobLearning);
 
         // Find first target
         if (!findAndAttackNextHostile()) {
@@ -258,6 +288,11 @@ public class CombatController {
         bot.selectBestWeapon();
         if (config.autoShield) {
             bot.equipShieldToOffhand();
+        }
+
+        // Record encounter for mob learning
+        if (config.mobLearning) {
+            profileManager.getProfile(nearest).recordEncounter();
         }
 
         BridgeMod.LOGGER.info("Bot '{}' auto-attack: targeting {} ({}, dist={})",
@@ -326,6 +361,41 @@ public class CombatController {
         ticksSinceRepath++;
         ticksSinceLastAttack++;
 
+        // === Mob learning: observe, collect data, adapt parameters ===
+        if (config.mobLearning && observer != null) {
+            observer.tick();
+            if (bot.hurtTime == 9) {
+                LivingEntity attacker = bot.getLastHurtByMob();
+                if (attacker != null && attacker.isAlive()) {
+                    observer.onHit(attacker);
+                }
+            }
+            observer.periodicLog();
+
+            // Update adapted parameters from target's profile
+            targetProfile = profileManager.getProfile(target);
+            effectiveMeleeClose = ParameterAdapter.computeMeleeCloseThreshold(targetProfile);
+            effectiveMeleeExit = ParameterAdapter.computeMeleeExitThreshold(targetProfile);
+            effectivePursuitDodgeTicks = ParameterAdapter.computePursuitDodgeTicks(targetProfile);
+            effectiveThreatMemoryTicks = ParameterAdapter.computeThreatMemoryTicks(targetProfile);
+
+            // Log adapted parameters periodically (every 3 seconds)
+            if (bot.tickCount % 60 == 0) {
+                BridgeMod.LOGGER.info("Bot '{}' MOB LEARN [{}] conf={} | meleeClose={} meleeExit={} dodgeTk={} memTk={}",
+                        bot.getBotName(), targetProfile.entityTypeId,
+                        String.format("%.0f%%", targetProfile.getOverallConfidence() * 100),
+                        String.format("%.2f", effectiveMeleeClose),
+                        String.format("%.2f", effectiveMeleeExit),
+                        effectivePursuitDodgeTicks, effectiveThreatMemoryTicks);
+            }
+        } else {
+            targetProfile = null;
+            effectiveMeleeClose = MELEE_CLOSE;
+            effectiveMeleeExit = MELEE_EXIT;
+            effectivePursuitDodgeTicks = 5;
+            effectiveThreatMemoryTicks = THREAT_MEMORY_TICKS;
+        }
+
         // Periodic state summary (every 20 ticks = 1 second)
         if (ticksSinceRepath % 20 == 0) {
             BridgeMod.LOGGER.debug("Bot '{}' combat: state={}, dist={}, bot=({},{},{}), target=({},{},{}), nav={}",
@@ -352,7 +422,7 @@ public class CombatController {
 
     private void tickPursuing(double dist) {
         // Close enough → switch to melee
-        if (dist <= MELEE_CLOSE) {
+        if (dist <= effectiveMeleeClose) {
             navController.stop();
             pursuitDodgeTicks = 0;
             enterMelee();
@@ -382,7 +452,7 @@ public class CombatController {
                 while (relAngle < -180) relAngle += 360;
 
                 pursuitDodgeStrafe = relAngle > 0 ? -1.0f : 1.0f;
-                pursuitDodgeTicks = 5;
+                pursuitDodgeTicks = effectivePursuitDodgeTicks;
                 if (navController.isNavigating()) {
                     navController.stop();
                 }
@@ -397,18 +467,34 @@ public class CombatController {
         // Check EVERY tick — the bot should always fight the closest hostile,
         // not charge past nearby zombies to reach a distant target.
         if (autoAttackMode) {
+            // When hit by a non-target mob, immediately consider switching to attacker
+            if (bot.hurtTime == 9) {
+                LivingEntity attacker = bot.getLastHurtByMob();
+                if (attacker != null && attacker != target && attacker.isAlive()
+                        && attacker instanceof Enemy) {
+                    double attackerDist = bot.distanceTo(attacker);
+                    // Switch if attacker is close (within 4 blocks) — don't ignore mobs hitting us
+                    if (attackerDist < 4.0) {
+                        BridgeMod.LOGGER.info("Bot '{}' target switch (hit by): {} (id={}, dist={})",
+                                bot.getBotName(), attacker.getType().toShortString(),
+                                attacker.getId(), String.format("%.1f", attackerDist));
+                        switchTarget((LivingEntity) attacker);
+                        return;
+                    }
+                }
+            }
+
             float targetHpPercent = target.getHealth() / target.getMaxHealth();
-            boolean finishingBlow = targetHpPercent < 0.3f;
+            // Finishing blow protection: lower threshold when swarmed
+            float finishingThreshold = config.threatAwareness && nearbyThreats.size() >= 2
+                    ? 0.15f : 0.3f;
+            boolean finishingBlow = targetHpPercent < finishingThreshold;
 
             if (!finishingBlow) {
-                // Always pick the absolute closest hostile (threshold = 0, just beat current distance)
                 LivingEntity closest = findAbsoluteClosestHostile();
                 if (closest != null && closest != target) {
                     double closestDist = bot.distanceTo(closest);
-                    // Anti-oscillation threshold: potential field mode is more aggressive
-                    // (0.5 block diff) since it naturally avoids charging through groups
-                    double switchThreshold = 0.5;
-                    if (closestDist < dist - switchThreshold) {
+                    if (closestDist < dist - 0.5) {
                         BridgeMod.LOGGER.info("Bot '{}' target switch: {} (id={}, dist={}) closer than current (dist={})",
                                 bot.getBotName(), closest.getType().toShortString(),
                                 closest.getId(),
@@ -417,18 +503,6 @@ public class CombatController {
                         switchTarget(closest);
                         return;
                     }
-                }
-            } else if (bot.hurtTime == 9) {
-                // Finishing blow mode: only switch if attacked by very close mob (< 3 blocks)
-                LivingEntity attacker = bot.getLastHurtByMob();
-                if (attacker != null && attacker != target && attacker.isAlive()
-                        && attacker instanceof Enemy && bot.distanceTo(attacker) < 3.0) {
-                    BridgeMod.LOGGER.info("Bot '{}' target switch (finishing interrupted): {} (id={}, dist={})",
-                            bot.getBotName(), attacker.getType().toShortString(),
-                            attacker.getId(),
-                            String.format("%.1f", bot.distanceTo(attacker)));
-                    switchTarget((LivingEntity) attacker);
-                    return;
                 }
             }
         }
@@ -451,6 +525,7 @@ public class CombatController {
                         config.threatRepulsionK,
                         config.threatRepulsionRange
                 );
+
                 float[] inputs = CombatPotentialField.worldToRelativeInput(
                         force[0], force[1], bot.getYRot());
 
@@ -593,24 +668,39 @@ public class CombatController {
 
     private void tickMelee(double dist) {
         // Target moved out of range → resume pursuit
-        if (dist > MELEE_EXIT) {
+        if (dist > effectiveMeleeExit) {
             resetAllMeleeState();
             startPursuit();
             return;
         }
 
         // === 0.5. Melee target re-evaluation ===
-        // SKIP during disengage: switching targets resets flee direction → zigzag death spiral
-        if (autoAttackMode && disengageTicksRemaining <= 0) {
+        if (autoAttackMode) {
+            // When hit by a non-target mob: immediately switch to attacker
+            if (bot.hurtTime == 9) {
+                LivingEntity attacker = bot.getLastHurtByMob();
+                if (attacker != null && attacker != target && attacker.isAlive()
+                        && attacker instanceof Enemy) {
+                    double attackerDist = bot.distanceTo(attacker);
+                    if (attackerDist < 4.0) {
+                        BridgeMod.LOGGER.info("Bot '{}' melee switch (hit by): {} (dist={})",
+                                bot.getBotName(), attacker.getType().toShortString(),
+                                String.format("%.1f", attackerDist));
+                        resetAllMeleeState();
+                        switchTarget((LivingEntity) attacker);
+                        return;
+                    }
+                }
+            }
+
             float targetHpPct = target.getHealth() / target.getMaxHealth();
-            if (targetHpPct >= 0.3f) { // don't switch off a nearly-dead target
+            float finishingThreshold = (config.threatAwareness && nearbyThreats.size() >= 2)
+                    ? 0.15f : 0.3f;
+            if (targetHpPct >= finishingThreshold) {
                 LivingEntity closest = findAbsoluteClosestHostile();
                 if (closest != null && closest != target) {
                     double closestDist = bot.distanceTo(closest);
-                    // Just attacked → target got knocked back → use 0 threshold to instantly
-                    // switch to nearest, don't chase the knocked-away target into the group
-                    double switchThreshold = ticksSinceLastAttack <= 2 ? 0.0 : 0.5;
-                    if (closestDist < dist - switchThreshold) {
+                    if (closestDist < dist - 0.5) {
                         BridgeMod.LOGGER.info("Bot '{}' melee target switch: {} (dist={}) closer than current (dist={})",
                                 bot.getBotName(), closest.getType().toShortString(),
                                 String.format("%.1f", closestDist), String.format("%.1f", dist));
@@ -622,135 +712,9 @@ public class CombatController {
             }
         }
 
-        // === 0.8. Threat scan (moved early for disengage check) ===
+        // === 0.8. Threat scan ===
         if (config.threatAwareness) {
             scanNearbyThreats();
-        }
-
-        // === 0.9. Disengage: when swarmed, flee until safe ===
-        if (config.threatAwareness) {
-            long closeThreats = nearbyThreats.stream()
-                    .filter(t -> t.distance < DISENGAGE_CLOSE_RANGE).count();
-
-            // Trigger disengage when swarmed
-            if (closeThreats >= DISENGAGE_CLOSE_THRESHOLD && disengageTicksRemaining <= 0) {
-                disengageTicksRemaining = DISENGAGE_DURATION;
-
-                // Compute escape direction ONCE: away from centroid of all enemies
-                double bx = bot.getX(), bz = bot.getZ();
-                double centroidX = target.getX(), centroidZ = target.getZ();
-                int enemyCount = 1; // target counts
-                for (ThreatData t : nearbyThreats) {
-                    centroidX += t.entity.getX();
-                    centroidZ += t.entity.getZ();
-                    enemyCount++;
-                }
-                centroidX /= enemyCount;
-                centroidZ /= enemyCount;
-
-                // Direction: away from centroid
-                double edx = bx - centroidX;
-                double edz = bz - centroidZ;
-                double eDist = Math.sqrt(edx * edx + edz * edz);
-                if (eDist > 0.01) {
-                    escapeAngleX = edx / eDist;
-                    escapeAngleZ = edz / eDist;
-                } else {
-                    // Fallback: away from target
-                    double dx2 = bx - target.getX();
-                    double dz2 = bz - target.getZ();
-                    double d2 = Math.sqrt(dx2 * dx2 + dz2 * dz2);
-                    escapeAngleX = d2 > 0.01 ? dx2 / d2 : 0;
-                    escapeAngleZ = d2 > 0.01 ? dz2 / d2 : 1;
-                }
-
-                BridgeMod.LOGGER.info("Bot '{}' DISENGAGE: {} close threats, escaping toward ({},{})",
-                        bot.getBotName(), closeThreats,
-                        String.format("%.2f", escapeAngleX),
-                        String.format("%.2f", escapeAngleZ));
-            }
-
-            if (disengageTicksRemaining > 0) {
-                disengageTicksRemaining--;
-
-                // Base: committed escape direction (no recalculation = no zigzag)
-                double fx = escapeAngleX * 2.0;
-                double fz = escapeAngleZ * 2.0;
-
-                double bx = bot.getX(), bz = bot.getZ();
-
-                // Threat repulsion: dodge individual zombies during retreat
-                // Without this, bot runs in a straight line and collides with side zombies
-                double fleeRepK = config.threatRepulsionK * 2.5; // extra strong during flee
-                // Repel from primary target
-                {
-                    double tdx = target.getX() - bx;
-                    double tdz = target.getZ() - bz;
-                    double tDist = Math.sqrt(tdx * tdx + tdz * tdz);
-                    if (tDist < 0.5) tDist = 0.5;
-                    if (tDist < config.threatRepulsionRange) {
-                        double rep = fleeRepK / (tDist * tDist);
-                        rep = Math.min(rep, 5.0);
-                        fx -= (tdx / tDist) * rep;
-                        fz -= (tdz / tDist) * rep;
-                    }
-                }
-                // Repel from each secondary threat
-                for (ThreatData threat : nearbyThreats) {
-                    double tdx = threat.entity.getX() - bx;
-                    double tdz = threat.entity.getZ() - bz;
-                    double tDist = threat.distance;
-                    if (tDist < 0.5) tDist = 0.5;
-                    if (tDist > config.threatRepulsionRange) continue;
-                    double rep = fleeRepK / (tDist * tDist);
-                    rep = Math.min(rep, 5.0);
-                    fx -= (tdx / tDist) * rep;
-                    fz -= (tdz / tDist) * rep;
-                }
-
-                // Wall avoidance during escape
-                Level level = bot.level();
-                int by = (int) Math.floor(bot.getY());
-                double[][] cardinals = {{ 0, -1}, { 0, 1}, {-1, 0}, { 1, 0}};
-                for (double[] off : cardinals) {
-                    double checkX = bx + off[0] * 1.5;
-                    double checkZ = bz + off[1] * 1.5;
-                    BlockPos pos = new BlockPos((int) Math.floor(checkX), by, (int) Math.floor(checkZ));
-                    BlockPos posUp = pos.above();
-                    if (level.getBlockState(pos).isSolidRender(level, pos)
-                            && level.getBlockState(posUp).isSolidRender(level, posUp)) {
-                        // Wall in this direction — deflect escape
-                        fx -= off[0] * 1.5;
-                        fz -= off[1] * 1.5;
-                    }
-                }
-
-                float[] inputs = CombatPotentialField.worldToRelativeInput(fx, fz, bot.getYRot());
-                bot.setMovementInput(inputs[0], inputs[1], false);
-                bot.setSprinting(true);
-
-                // Cancel early if we've cleared the swarm
-                double nearestThreatDist = nearbyThreats.isEmpty() ? 999
-                        : nearbyThreats.get(0).distance;
-                if (nearestThreatDist > DISENGAGE_SAFE_RANGE && dist > DISENGAGE_SAFE_RANGE) {
-                    disengageTicksRemaining = 0;
-                    BridgeMod.LOGGER.info("Bot '{}' disengage complete: nearest threat at {}",
-                            bot.getBotName(), String.format("%.1f", nearestThreatDist));
-                }
-
-                if (bot.tickCount % 10 == 0) {
-                    BridgeMod.LOGGER.info("Bot '{}' FLEEING: {} ticks left, nearest threat={}, fwd={} strafe={}",
-                            bot.getBotName(), disengageTicksRemaining,
-                            String.format("%.1f", nearestThreatDist),
-                            String.format("%.2f", inputs[0]),
-                            String.format("%.2f", inputs[1]));
-                }
-
-                // Opportunistic attack while fleeing — don't waste DPS
-                attemptNormalAttack(dist);
-
-                return; // skip advanced attack modes while fleeing
-            }
         }
 
         // === 1. KB Cancel: react to being hit (highest priority) ===
@@ -771,24 +735,57 @@ public class CombatController {
         }
 
         // === 3. Compute movement via potential field ===
-        // Dynamic optimal distance: kite outside zombie attack range (~2.0 blocks)
-        // Base should be at bot's max attack range so it can still hit while staying safe
-        double effectiveOptimalDist = config.optimalMeleeDistance;
+        // Dynamic optimal distance: kite outside mob attack range
+        // When mob learning is active, distances adapt to the learned attack range
         int threatCount = nearbyThreats.size();
-        if (threatCount >= 4) {
-            effectiveOptimalDist = 4.0;  // heavily swarmed: stay well outside zombie reach
-        } else if (threatCount == 3) {
-            effectiveOptimalDist = 3.8;
-        } else if (threatCount == 2) {
-            effectiveOptimalDist = 3.5;
-        } else if (threatCount == 1) {
-            effectiveOptimalDist = 3.2;
+        double effectiveOptimalDist;
+        if (config.mobLearning && targetProfile != null) {
+            effectiveOptimalDist = ParameterAdapter.computeOptimalDistanceWithThreats(
+                    targetProfile, config.optimalMeleeDistance, threatCount);
+        } else {
+            // Legacy hardcoded escalation
+            // Keep near ATTACK_RANGE (3.0) so bot can still attack, but add buffer for threats
+            effectiveOptimalDist = config.optimalMeleeDistance;
+            if (threatCount >= 4) {
+                effectiveOptimalDist = 4.5;
+            } else if (threatCount == 3) {
+                effectiveOptimalDist = 4.2;
+            } else if (threatCount == 2) {
+                effectiveOptimalDist = 3.8;
+            } else if (threatCount == 1) {
+                effectiveOptimalDist = 3.5;
+            }
         }
 
         // Aggressively boost threat repulsion when outnumbered
+        // When mob learning is active, scale K by learned mob speed
         double effectiveThreatK = config.threatRepulsionK;
+        if (config.mobLearning && targetProfile != null) {
+            effectiveThreatK = ParameterAdapter.computeThreatRepulsionK(targetProfile, config.threatRepulsionK);
+        }
         if (threatCount >= 1) {
-            effectiveThreatK *= 1.0 + 0.5 * threatCount;
+            effectiveThreatK *= 1.0 + 1.0 * threatCount;
+        }
+
+        // When multiple threats: include primary target in threat list so ALL enemies
+        // contribute to retreat direction. This prevents direction instability when
+        // switching targets — retreat direction is now determined by the full group,
+        // not just which zombie happens to be the current target.
+        List<ThreatData> allThreats;
+        if (threatCount >= 1) {
+            allThreats = new ArrayList<>(nearbyThreats.size() + 1);
+            // Add primary target as a threat source
+            double tdist = bot.distanceTo(target);
+            double tdx = target.getX() - bot.getX();
+            double tdz = target.getZ() - bot.getZ();
+            float tYaw = (float) (Math.atan2(-tdx, tdz) * 180.0 / Math.PI);
+            float tRelAngle = tYaw - bot.getYRot();
+            while (tRelAngle > 180) tRelAngle -= 360;
+            while (tRelAngle < -180) tRelAngle += 360;
+            allThreats.add(new ThreatData(target, tdist, tRelAngle));
+            allThreats.addAll(nearbyThreats);
+        } else {
+            allThreats = nearbyThreats;
         }
 
         // When bot just got hit, compute with debug breakdown to log force analysis
@@ -796,7 +793,7 @@ public class CombatController {
                 (bot.hurtTime == 9) ? new CombatPotentialField.ForceBreakdown() : null;
 
         double[] force = CombatPotentialField.computeForceVector(
-                bot, target, nearbyThreats,
+                bot, target, allThreats,
                 effectiveOptimalDist,
                 config.tangentStrength,
                 effectiveThreatK,
@@ -804,6 +801,7 @@ public class CombatController {
                 currentStrafeDirection,
                 dbgBreakdown
         );
+
         float[] inputs = CombatPotentialField.worldToRelativeInput(
                 force[0], force[1], bot.getYRot());
         float computedForward = inputs[0];
@@ -1002,7 +1000,7 @@ public class CombatController {
 
         // Expire old entries
         damageTracker.entrySet().removeIf(e ->
-                bot.tickCount - e.getValue() > THREAT_MEMORY_TICKS);
+                bot.tickCount - e.getValue() > effectiveThreatMemoryTicks);
 
         float botYaw = bot.getYRot();
 
@@ -1072,9 +1070,16 @@ public class CombatController {
         // Lower shield before attacking
         stopShielding();
 
-        BridgeMod.LOGGER.info("Bot '{}' ATTACKING entity {} (dist={}, ticks={})",
+        // Sweep attack: when 2+ nearby threats, stop sprinting so vanilla sweep triggers
+        // Sweep hits all entities within ~1 block of target for free AOE damage
+        boolean doSweep = nearbyThreats.size() >= 1;
+        if (doSweep) {
+            bot.setSprinting(false);
+        }
+
+        BridgeMod.LOGGER.info("Bot '{}' ATTACKING entity {} (dist={}, ticks={}, sweep={})",
                 bot.getBotName(), target.getId(),
-                String.format("%.1f", dist), ticksSinceLastAttack);
+                String.format("%.1f", dist), ticksSinceLastAttack, doSweep);
 
         bot.setForceFullAttackStrength(true);
         bot.attack(target);
@@ -1190,13 +1195,19 @@ public class CombatController {
 
         stopShielding();
 
-        // W-tap: toggle sprint off→on in same tick to reset "first sprint hit" flag
-        bot.setSprinting(false);
-        bot.setSprinting(true);
+        // When multiple threats: prefer sweep AOE over single-target knockback
+        boolean doSweep = nearbyThreats.size() >= 1;
+        if (!doSweep) {
+            // W-tap: toggle sprint off→on in same tick to reset "first sprint hit" flag
+            bot.setSprinting(false);
+            bot.setSprinting(true);
+        } else {
+            bot.setSprinting(false);
+        }
 
-        BridgeMod.LOGGER.info("Bot '{}' WTAP ATTACK entity {} (dist={}, ticks={})",
-                bot.getBotName(), target.getId(),
-                String.format("%.1f", dist), ticksSinceLastAttack);
+        BridgeMod.LOGGER.info("Bot '{}' {} entity {} (dist={}, ticks={})",
+                bot.getBotName(), doSweep ? "SWEEP ATTACK" : "WTAP ATTACK",
+                target.getId(), String.format("%.1f", dist), ticksSinceLastAttack);
 
         bot.setForceFullAttackStrength(true);
         bot.attack(target);
@@ -1227,12 +1238,19 @@ public class CombatController {
                         && bot.hasLineOfSight(target)) {
                     stopShielding();
 
-                    // Sprint reset (same as W-tap)
-                    bot.setSprinting(false);
-                    bot.setSprinting(true);
+                    // When multiple threats: prefer sweep AOE over single-target knockback
+                    boolean doSweep = nearbyThreats.size() >= 1;
+                    if (!doSweep) {
+                        // Sprint reset (same as W-tap)
+                        bot.setSprinting(false);
+                        bot.setSprinting(true);
+                    } else {
+                        bot.setSprinting(false);
+                    }
 
-                    BridgeMod.LOGGER.info("Bot '{}' STAP ATTACK entity {} (dist={})",
-                            bot.getBotName(), target.getId(), String.format("%.1f", dist));
+                    BridgeMod.LOGGER.info("Bot '{}' {} entity {} (dist={})",
+                            bot.getBotName(), doSweep ? "SWEEP ATTACK" : "STAP ATTACK",
+                            target.getId(), String.format("%.1f", dist));
 
                     bot.setForceFullAttackStrength(true);
                     bot.attack(target);
@@ -1414,9 +1432,14 @@ public class CombatController {
         stapPhase = StapPhase.APPROACH;
         stapBackTicksRemaining = 0;
         pursuitDodgeTicks = 0;
-        disengageTicksRemaining = 0;
         nearbyThreats.clear();
         damageTracker.clear();
+
+        // Save mob profiles if learning was active
+        if (config.mobLearning && profileManager.size() > 0) {
+            Path gameDir = bot.getServer().getServerDirectory().toPath();
+            MobProfileStorage.saveAll(profileManager, gameDir);
+        }
 
         // Stop navigation if pursuing
         if (prevState == State.PURSUING && navController.isNavigating()) {
@@ -1494,7 +1517,6 @@ public class CombatController {
         stapBackTicksRemaining = 0;
         reactionaryCritActive = false;
         reactionaryCritTicks = 0;
-        disengageTicksRemaining = 0;
     }
 
     // ==================== Helpers ====================
@@ -1511,7 +1533,7 @@ public class CombatController {
         if (closest != null && closest != target) {
             double closestDist = bot.distanceTo(closest);
             double currentDist = bot.distanceTo(target);
-            if (closestDist < currentDist) {
+            if (closestDist < currentDist - 0.5) {
                 BridgeMod.LOGGER.info("Bot '{}' post-attack retarget: {} (dist={}) now closer than {} (dist={})",
                         bot.getBotName(),
                         closest.getType().toShortString(), String.format("%.1f", closestDist),

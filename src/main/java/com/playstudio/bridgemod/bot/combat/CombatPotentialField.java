@@ -165,7 +165,7 @@ public class CombatPotentialField {
                 // Inverse-square repulsion, boosted 2x for blocking threats
                 double repulsionMult = blocking ? 2.0 : 1.0;
                 double repulsion = (threatK * repulsionMult) / (tDist * tDist);
-                repulsion = Math.min(repulsion, 4.0);
+                repulsion = Math.min(repulsion, 8.0);
                 double tnx = -tdx / tDist; // away from threat
                 double tnz = -tdz / tDist;
                 double tfx = tnx * repulsion;
@@ -210,10 +210,10 @@ public class CombatPotentialField {
                 // Deliberately weak so bot decelerates before reaching optimal distance
                 radialStrength = clamp(radialError * 0.4, 0.0, 1.0);
             } else {
-                // Too close: STRONG push out (spring constant 3.0, cap -5.0)
-                // Asymmetric: push-out is 7.5x stronger than pull-in
-                // High cap ensures bot retreats fast even at large optimal distances (4.0+)
-                radialStrength = clamp(radialError * 3.0, -5.0, 0.0);
+                // Too close: STRONG push out (spring constant 4.0, cap -6.0)
+                // Asymmetric: push-out is 10x stronger than pull-in
+                // High cap ensures bot retreats fast even at large optimal distances (4.5+)
+                radialStrength = clamp(radialError * 4.0, -6.0, 0.0);
             }
 
             // If threats are blocking the path, weaken forward pull to avoid charging through

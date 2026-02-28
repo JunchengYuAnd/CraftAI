@@ -46,6 +46,9 @@ public class CombatConfig {
     public boolean threatAwareness = false;     // scan nearby threats while fighting primary target
     public double threatScanRadius = 8.0;       // radius to scan for secondary threats
 
+    // Mob learning: observe mob behavior and auto-adapt combat parameters
+    public boolean mobLearning = false;         // enable observation-based parameter adaptation
+
     // Potential field movement
     public double optimalMeleeDistance = 3.0;     // ring field center distance from target (= ATTACK_RANGE)
     public double tangentStrength = 0.4;          // orbital strafing force strength

@@ -485,14 +485,18 @@ public class FakePlayer extends ServerPlayer {
     // ==================== Phase 4: Combat & Interaction APIs ====================
 
     /**
-     * Select the best melee weapon from hotbar (slots 0-8).
+     * Select the best melee weapon from the entire inventory (hotbar + main inventory).
+     * Searches all 36 slots (0-8 hotbar, 9-35 main inventory).
+     * If the best weapon is in main inventory, swaps it to the current hotbar slot.
      * Picks the item with the highest ATTACK_DAMAGE attribute.
      * Naturally prefers swords (higher DPS) over axes.
      */
     public void selectBestWeapon() {
         double bestDamage = 0;
         int bestSlot = -1;
-        for (int i = 0; i < 9; i++) {
+
+        // Search all 36 inventory slots (0-8 hotbar, 9-35 main inventory)
+        for (int i = 0; i < 36; i++) {
             ItemStack stack = this.getInventory().getItem(i);
             if (stack.isEmpty()) continue;
             var modifiers = stack.getAttributeModifiers(EquipmentSlot.MAINHAND);
@@ -510,8 +514,21 @@ public class FakePlayer extends ServerPlayer {
                 bestSlot = i;
             }
         }
-        if (bestSlot >= 0) {
+
+        if (bestSlot < 0) return;
+
+        if (bestSlot < 9) {
+            // Already in hotbar — just select it
             setSelectedSlot(bestSlot);
+        } else {
+            // In main inventory — swap to current hotbar slot
+            int hotbarSlot = this.getInventory().selected;
+            ItemStack hotbarItem = this.getInventory().getItem(hotbarSlot);
+            ItemStack bestItem = this.getInventory().getItem(bestSlot);
+            this.getInventory().setItem(hotbarSlot, bestItem);
+            this.getInventory().setItem(bestSlot, hotbarItem);
+            BridgeMod.LOGGER.info("Bot '{}' swapped weapon from inventory slot {} to hotbar slot {} ({})",
+                    getBotName(), bestSlot, hotbarSlot, bestItem.getDisplayName().getString());
         }
     }
 
